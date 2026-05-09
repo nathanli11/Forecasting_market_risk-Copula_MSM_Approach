@@ -35,6 +35,7 @@ class MSMFitResult:
     success: bool
     message: str
     nobs: int
+    mean: float
 
 
 def make_msm_states(k: int, m0: float) -> np.ndarray:
@@ -188,6 +189,261 @@ def msm_loglikelihood(
     return float(loglik)
 
 
+def msm_filter(
+    returns: pd.Series | np.ndarray,
+    k: int,
+    m0: float,
+    sigma: float,
+    b: float,
+    gamma_k: float,
+    mean: float = 0.0,
+    clip_cdf: float = 1e-10,
+) -> dict[str, pd.Series | pd.DataFrame | float]:
+    """Run the MSM Hamilton filter and return conditional objects.
+
+    Parameters
+    ----------
+    returns:
+        Uncentered return series. If you already have centered returns, pass
+        mean=0.0.
+    k:
+        Number of MSM volatility components.
+    m0, sigma, b, gamma_k:
+        MSM parameters.
+    mean:
+        Constant conditional mean used to center returns.
+    clip_cdf:
+        Numerical clipping level for PIT values.
+
+    Returns
+    -------
+    dict
+        Dictionary containing predicted probabilities, filtered probabilities,
+        conditional densities, conditional CDFs, PIT values, conditional
+        volatility and log-likelihood.
+    """
+    series = _as_series_with_index(returns)
+    centered = series - mean
+    values = centered.to_numpy(dtype=float)
+
+    states = make_msm_states(k=k, m0=m0)
+    gammas = renewal_probabilities_from_gamma_k(k=k, b=b, gamma_k=gamma_k)
+    transition = transition_matrix_from_gammas(gammas)
+
+    h = np.sqrt(np.prod(states, axis=1))
+    state_sigmas = sigma * h
+
+    if np.any(state_sigmas <= 0) or np.any(~np.isfinite(state_sigmas)):
+        raise ValueError("Invalid MSM state standard deviations.")
+
+    n_obs = values.shape[0]
+    n_states = states.shape[0]
+
+    predicted_probs = np.full(n_states, 1.0 / n_states)
+
+    predicted_probs_store = np.empty((n_obs, n_states), dtype=float)
+    filtered_probs_store = np.empty((n_obs, n_states), dtype=float)
+    densities = np.empty(n_obs, dtype=float)
+    cdfs = np.empty(n_obs, dtype=float)
+    conditional_volatility = np.empty(n_obs, dtype=float)
+
+    loglik = 0.0
+
+    log_state_sigmas = np.log(state_sigmas)
+    log_sqrt_2pi = 0.5 * np.log(2.0 * np.pi)
+
+    for t, obs in enumerate(values):
+        predicted_probs_store[t, :] = predicted_probs
+        z = obs / state_sigmas
+        log_state_densities = (
+            -log_sqrt_2pi
+            - log_state_sigmas
+            - 0.5 * z**2
+        )
+        log_joint = np.log(predicted_probs + 1e-300) + log_state_densities
+        max_log_joint = np.max(log_joint)
+        log_density = max_log_joint + np.log(
+            np.exp(log_joint - max_log_joint).sum()
+        )
+        density_t = float(np.exp(log_density))
+        densities[t] = density_t
+        loglik += float(log_density)
+        # Conditional CDF:
+        # F(y_t | Omega_{t-1}) = sum_j p_{t|t-1}(j) Phi(y_t / sigma_j)
+        state_cdfs = norm.cdf(z)
+        cdf_t = float(np.sum(predicted_probs * state_cdfs))
+        cdfs[t] = np.clip(cdf_t, clip_cdf, 1.0 - clip_cdf)
+        # Conditional volatility:
+        # sqrt(E[sigma_t^2 | Omega_{t-1}])
+        conditional_variance_t = float(
+            np.sum(predicted_probs * state_sigmas**2)
+        )
+        conditional_volatility[t] = np.sqrt(conditional_variance_t)
+        # Bayesian update:
+        # p_{t|t}(j) = p_{t|t-1}(j) f_j(y_t) / f(y_t | Omega_{t-1})
+        filtered_probs = np.exp(log_joint - log_density)
+        filtered_probs_store[t, :] = filtered_probs
+        # Prediction:
+        # p_{t+1|t} = p_{t|t} P
+        predicted_probs = filtered_probs @ transition
+        predicted_probs = np.clip(predicted_probs, 1e-300, 1.0)
+        predicted_probs /= predicted_probs.sum()
+
+    state_columns = [f"state_{i}" for i in range(n_states)]
+
+    return {
+        "centered_returns": pd.Series(
+            centered.to_numpy(),
+            index=series.index,
+            name=series.name,
+        ),
+        "predicted_probs": pd.DataFrame(
+            predicted_probs_store,
+            index=series.index,
+            columns=state_columns,
+        ),
+        "filtered_probs": pd.DataFrame(
+            filtered_probs_store,
+            index=series.index,
+            columns=state_columns,
+        ),
+        "densities": pd.Series(
+            densities,
+            index=series.index,
+            name=series.name,
+        ),
+        "cdfs": pd.Series(
+            cdfs,
+            index=series.index,
+            name=series.name,
+        ),
+        "pit": pd.Series(
+            cdfs,
+            index=series.index,
+            name=series.name,
+        ),
+        "conditional_volatility": pd.Series(
+            conditional_volatility,
+            index=series.index,
+            name=series.name,
+        ),
+        "log_likelihood": float(loglik),
+        "states": pd.DataFrame(states, columns=[f"M_{i+1}" for i in range(k)]),
+        "gammas": pd.Series(gammas, index=[f"gamma_{i+1}" for i in range(k)]),
+        "state_sigmas": pd.Series(state_sigmas, index=state_columns),
+    }
+
+
+def msm_conditional_cdf(
+    returns: pd.Series | np.ndarray,
+    k: int,
+    m0: float,
+    sigma: float,
+    b: float,
+    gamma_k: float,
+    mean: float = 0.0,
+    clip_cdf: float = 1e-10,
+) -> pd.Series:
+    """Return the MSM conditional CDF values F(y_t | Omega_{t-1})."""
+    filtered = msm_filter(
+        returns=returns,
+        k=k,
+        m0=m0,
+        sigma=sigma,
+        b=b,
+        gamma_k=gamma_k,
+        mean=mean,
+        clip_cdf=clip_cdf,
+    )
+    return filtered["cdfs"]
+
+
+def msm_probability_integral_transform(
+    returns: pd.Series,
+    fit_result: MSMFitResult,
+    clip_cdf: float = 1e-10,
+) -> pd.Series:
+    """Compute MSM PIT values from an estimated MSMFitResult.
+
+    The output is:
+        u_t = F_MSM(r_t - mu_hat | Omega_{t-1})
+    """
+    params = fit_result.params
+
+    pit = msm_conditional_cdf(
+        returns=returns,
+        k=fit_result.k,
+        m0=params.m0,
+        sigma=params.sigma,
+        b=params.b,
+        gamma_k=params.gamma_k,
+        mean=fit_result.mean,
+        clip_cdf=clip_cdf,
+    )
+
+    pit.name = returns.name
+    return pit
+
+
+def msm_filter_from_result(
+    returns: pd.Series,
+    fit_result: MSMFitResult,
+    clip_cdf: float = 1e-10,
+) -> dict[str, pd.Series | pd.DataFrame | float]:
+    """Run the MSM filter using a stored MSMFitResult."""
+    params = fit_result.params
+
+    return msm_filter(
+        returns=returns,
+        k=fit_result.k,
+        m0=params.m0,
+        sigma=params.sigma,
+        b=params.b,
+        gamma_k=params.gamma_k,
+        mean=fit_result.mean,
+        clip_cdf=clip_cdf,
+    )
+
+
+def build_msm_pit_frame(
+    returns: pd.DataFrame,
+    fit_results: dict[str, MSMFitResult],
+    clip_cdf: float = 1e-10,
+) -> pd.DataFrame:
+    """Build a DataFrame of MSM PIT values for several assets."""
+    pits = {}
+
+    for asset in returns.columns:
+        if asset not in fit_results:
+            raise KeyError(f"Missing MSM fit result for asset: {asset}")
+
+        pits[asset] = msm_probability_integral_transform(
+            returns=returns[asset],
+            fit_result=fit_results[asset],
+            clip_cdf=clip_cdf,
+        )
+
+    pit_frame = pd.concat(pits, axis=1).dropna(how="any")
+    pit_frame.index.name = returns.index.name or "date"
+
+    return pit_frame
+
+
+def _as_series_with_index(values: pd.Series | np.ndarray) -> pd.Series:
+    """Convert array-like values to a clean Series while preserving index if possible."""
+    if isinstance(values, pd.Series):
+        series = pd.to_numeric(values, errors="coerce").dropna()
+        return series.astype(float)
+
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+
+    if array.size == 0:
+        raise ValueError("At least one observation is required.")
+
+    return pd.Series(array, dtype=float)
+
+
 def fit_msm(
     returns: pd.Series,
     k: int,
@@ -308,6 +564,7 @@ def fit_msm(
         success=bool(best_result.success),
         message=str(best_result.message),
         nobs=int(series.shape[0]),
+        mean=float(series.mean()),
     )
 
 
@@ -334,6 +591,7 @@ def fit_msm_grid(
                 {
                     "asset": result.asset,
                     "k": result.k,
+                    "mean": result.mean,
                     "m0": result.params.m0,
                     "sigma": result.params.sigma,
                     "b": result.params.b,
