@@ -22,6 +22,20 @@ from src.data import (
     save_yahoo_index_csv,
     simple_returns,
 )
+from src.garch import (
+    GARCHFitResult,
+    build_garch_pit_frame,
+    build_garch_volatility_frame,
+    fit_garch_11,
+    fit_garch_marginals,
+    format_garch_table_3,
+    garch_conditional_volatility,
+    garch_diagnostics,
+    garch_fit_result_to_dict,
+    garch_probability_integral_transform,
+    garch_results_table,
+    garch_standardized_residuals,
+)
 from src.msm import (
     MSMFitResult,
     MSMParams,
@@ -32,10 +46,27 @@ from src.msm import (
     msm_conditional_cdf,
     msm_filter,
     msm_filter_from_result,
+    msm_fit_result_to_dict,
     msm_loglikelihood,
     msm_probability_integral_transform,
     renewal_probabilities_from_gamma_k,
     transition_matrix_from_gammas,
+)
+from src.copulas import (
+    CopulaFitResult,
+    fit_all_copulas,
+    fit_copula,
+    fit_copula_grid,
+    format_copula_table_4,
+    gaussian_copula_logpdf,
+    student_copula_logpdf,
+    clayton_copula_logpdf,
+    rotated_clayton_copula_logpdf,
+    gumbel_copula_logpdf,
+    rotated_gumbel_copula_logpdf,
+    frank_copula_logpdf,
+    plackett_copula_logpdf,
+    copula_results_table,
 )
 from src.plotting import (
     plot_price_evolution,
@@ -85,6 +116,20 @@ __all__ = [
     "save_yahoo_index_csv",
     "simple_returns",
 
+    # GARCH
+    "GARCHFitResult",
+    "build_garch_pit_frame",
+    "build_garch_volatility_frame",
+    "fit_garch_11",
+    "fit_garch_marginals",
+    "format_garch_table_3",
+    "garch_conditional_volatility",
+    "garch_diagnostics",
+    "garch_fit_result_to_dict",
+    "garch_probability_integral_transform",
+    "garch_results_table",
+    "garch_standardized_residuals",
+
     # MSM
     "MSMFitResult",
     "MSMParams",
@@ -95,10 +140,27 @@ __all__ = [
     "msm_conditional_cdf",
     "msm_filter",
     "msm_filter_from_result",
+    "msm_fit_result_to_dict",
     "msm_loglikelihood",
     "msm_probability_integral_transform",
     "renewal_probabilities_from_gamma_k",
     "transition_matrix_from_gammas",
+
+    # copulas
+    "CopulaFitResult",
+    "fit_all_copulas",
+    "fit_copula",
+    "fit_copula_grid",
+    "format_copula_table_4",
+    "gaussian_copula_logpdf",
+    "student_copula_logpdf",
+    "clayton_copula_logpdf",
+    "rotated_clayton_copula_logpdf",
+    "gumbel_copula_logpdf",
+    "rotated_gumbel_copula_logpdf",
+    "frank_copula_logpdf",
+    "plackett_copula_logpdf",
+    "copula_results_table",
 
     # plotting
     "plot_price_evolution",
