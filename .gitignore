@@ -1,0 +1,52 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.tmp_pytest/
+tmp_pytest/
+.ruff_cache/
+.cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Generated reports
+reports/*.csv
+reports/*.html
+reports/*.json
+reports/*.png
+reports/*.pdf
+
+# Build and packaging
+build/
+dist/
+*.egg-info/
+
+# Tooling and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Large local references or exports can be stored locally if needed
+*.zip
+*.7z
+*.rar
