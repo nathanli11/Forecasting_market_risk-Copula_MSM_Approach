@@ -136,7 +136,7 @@ def msm_loglikelihood(
 
     states = make_msm_states(k=k, m0=m0)
     gammas = renewal_probabilities_from_gamma_k(k=k, b=b, gamma_k=gamma_k)
-    #transition = transition_matrix_from_gammas(gammas)
+    transition = transition_matrix_from_gammas(gammas)
 
     h = np.sqrt(np.prod(states, axis=1))
     state_sigmas = sigma * h
@@ -166,7 +166,9 @@ def msm_loglikelihood(
         )
 
         log_joint = np.log(predicted_probs + 1e-300) + log_state_densities
-        log_density = logsumexp(log_joint)
+        #log_density = logsumexp(log_joint)
+        max_log_joint = np.max(log_joint)
+        log_density = max_log_joint + np.log(np.exp(log_joint - max_log_joint).sum())
 
         if not np.isfinite(log_density):
             return -np.inf
@@ -177,12 +179,11 @@ def msm_loglikelihood(
         filtered_probs = np.exp(log_joint - log_density)
 
         # Predict p_{t+1|t}
-        #predicted_probs = filtered_probs @ transition
-        predicted_probs = predict_next_probabilities(filtered_probs, gammas)
+        #predicted_probs = predict_next_probabilities(filtered_probs, gammas)
 
-        # Numerical safety
-        #predicted_probs = np.clip(predicted_probs, 1e-300, 1.0)
-        #predicted_probs /= predicted_probs.sum()
+        predicted_probs = filtered_probs @ transition
+        predicted_probs = np.clip(predicted_probs, 1e-300, 1.0)
+        predicted_probs /= predicted_probs.sum()
 
     return float(loglik)
 
@@ -219,44 +220,67 @@ def fit_msm(
         rng=rng,
     )
 
-    for x0 in initial_points:
+    # for x0 in initial_points:
+    #     opt = minimize(
+    #         _negative_loglikelihood,
+    #         x0=x0,
+    #         args=(y.to_numpy(dtype=float), k),
+    #         method="Nelder-Mead",
+    #         options={
+    #             "maxiter": 5000,
+    #             "xatol": 1e-5,
+    #             "fatol": 1e-5,
+    #         },
+    #     )
+    #     # Nelder-Mead does not enforce bounds, so evaluate only valid points.
+    #     x = opt.x
+    #     if not _params_in_bounds(x, bounds):
+    #         continue
+    #     loglik = -_negative_loglikelihood(x, y.to_numpy(dtype=float), k)
+    #     # Optional local refinement with bounds
+    #     opt_bounded = minimize(
+    #         _negative_loglikelihood,
+    #         x0=x,
+    #         args=(y.to_numpy(dtype=float), k),
+    #         method="L-BFGS-B",
+    #         bounds=bounds,
+    #         options={
+    #             "maxiter": 2000,
+    #             "ftol": 1e-8,
+    #         },
+    #     )
+    #     if opt_bounded.success:
+    #         x = opt_bounded.x
+    #         loglik = -float(opt_bounded.fun)
+    #         opt = opt_bounded
+
+    #     if np.isfinite(loglik) and loglik > best_loglik:
+    #         best_loglik = loglik
+    #         best_result = opt
+
+    y_array = y.to_numpy(dtype=float)
+    for start_id, x0 in enumerate(initial_points, start=1):
+        print(f"  start {start_id}/{len(initial_points)}: x0={x0}")
         opt = minimize(
             _negative_loglikelihood,
             x0=x0,
-            args=(y.to_numpy(dtype=float), k),
-            method="Nelder-Mead",
-            options={
-                "maxiter": 5000,
-                "xatol": 1e-5,
-                "fatol": 1e-5,
-            },
-        )
-
-        # Nelder-Mead does not enforce bounds, so evaluate only valid points.
-        x = opt.x
-        if not _params_in_bounds(x, bounds):
-            continue
-
-        loglik = -_negative_loglikelihood(x, y.to_numpy(dtype=float), k)
-
-        # Optional local refinement with bounds
-        opt_bounded = minimize(
-            _negative_loglikelihood,
-            x0=x,
-            args=(y.to_numpy(dtype=float), k),
+            args=(y_array, k),
             method="L-BFGS-B",
             bounds=bounds,
             options={
-                "maxiter": 2000,
-                "ftol": 1e-8,
+                "maxiter": 300,
+                "maxls": 20,
+                "ftol": 1e-6,
+                "gtol": 1e-5,
             },
         )
-
-        if opt_bounded.success:
-            x = opt_bounded.x
-            loglik = -float(opt_bounded.fun)
-            opt = opt_bounded
-
+        loglik = -float(opt.fun)
+        print(
+            f"    success={opt.success}, "
+            f"loglik={loglik:.3f}, "
+            f"nit={getattr(opt, 'nit', None)}, "
+            f"nfev={getattr(opt, 'nfev', None)}"
+        )
         if np.isfinite(loglik) and loglik > best_loglik:
             best_loglik = loglik
             best_result = opt
@@ -298,6 +322,7 @@ def fit_msm_grid(
 
     for asset in returns.columns:
         for k in k_values:
+            print(f"Estimating MSM: asset={asset}, k={k}, n_starts={n_starts}")
             result = fit_msm(
                 returns=returns[asset],
                 k=int(k),
@@ -388,13 +413,48 @@ def _negative_loglikelihood(
     return -float(loglik)
 
 
+# def _initial_points_for_msm(
+#     y: pd.Series,
+#     k: int,
+#     n_starts: int,
+#     rng: np.random.Generator,
+# ) -> list[np.ndarray]:
+#     """Generate starting values for numerical optimization."""
+#     sample_sigma = float(y.std(ddof=1))
+#     sample_sigma = max(sample_sigma, 1e-2)
+
+#     deterministic = [
+#         np.array([1.50, sample_sigma, 2.0, 0.10]),
+#         np.array([1.50, sample_sigma, 5.0, 0.20]),
+#         np.array([1.40, sample_sigma, 10.0, 0.10]),
+#         np.array([1.60, sample_sigma, 10.0, 0.20]),
+#         np.array([1.30, sample_sigma, 20.0, 0.10]),
+#     ]
+
+#     random_points = []
+
+#     for _ in range(max(0, n_starts - len(deterministic))):
+#         random_points.append(
+#             np.array(
+#                 [
+#                     rng.uniform(1.1, 1.8),          # m0
+#                     sample_sigma * rng.uniform(0.6, 1.6),  # sigma
+#                     rng.uniform(1.2, 30.0),         # b
+#                     rng.uniform(0.02, 0.95),        # gamma_k
+#                 ],
+#                 dtype=float,
+#             )
+#         )
+
+#     return deterministic + random_points
+
 def _initial_points_for_msm(
     y: pd.Series,
     k: int,
     n_starts: int,
     rng: np.random.Generator,
 ) -> list[np.ndarray]:
-    """Generate starting values for numerical optimization."""
+    """Generate exactly n_starts starting values for numerical optimization."""
     sample_sigma = float(y.std(ddof=1))
     sample_sigma = max(sample_sigma, 1e-2)
 
@@ -406,22 +466,22 @@ def _initial_points_for_msm(
         np.array([1.30, sample_sigma, 20.0, 0.10]),
     ]
 
-    random_points = []
+    points = deterministic[: min(n_starts, len(deterministic))]
 
-    for _ in range(max(0, n_starts - len(deterministic))):
-        random_points.append(
+    while len(points) < n_starts:
+        points.append(
             np.array(
                 [
-                    rng.uniform(1.1, 1.8),          # m0
-                    sample_sigma * rng.uniform(0.6, 1.6),  # sigma
-                    rng.uniform(1.2, 30.0),         # b
-                    rng.uniform(0.02, 0.95),        # gamma_k
+                    rng.uniform(1.1, 1.8),
+                    sample_sigma * rng.uniform(0.6, 1.6),
+                    rng.uniform(1.2, 30.0),
+                    rng.uniform(0.02, 0.95),
                 ],
                 dtype=float,
             )
         )
 
-    return deterministic + random_points
+    return points
 
 
 def _params_in_bounds(
