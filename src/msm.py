@@ -8,7 +8,6 @@ from itertools import product
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-from scipy.special import logsumexp
 from scipy.stats import norm
 
 
@@ -35,7 +34,7 @@ class MSMFitResult:
     success: bool
     message: str
     nobs: int
-    mean: float
+    mean_return: float
 
 
 def make_msm_states(k: int, m0: float) -> np.ndarray:
@@ -154,11 +153,6 @@ def msm_loglikelihood(
     log_sqrt_2pi = 0.5 * np.log(2.0 * np.pi)
 
     for obs in values:
-        # log_state_densities = norm.logpdf(
-        #     obs,
-        #     loc=0.0,
-        #     scale=state_sigmas,
-        # )
         z = obs / state_sigmas
         log_state_densities = (
             -log_sqrt_2pi
@@ -167,7 +161,6 @@ def msm_loglikelihood(
         )
 
         log_joint = np.log(predicted_probs + 1e-300) + log_state_densities
-        #log_density = logsumexp(log_joint)
         max_log_joint = np.max(log_joint)
         log_density = max_log_joint + np.log(np.exp(log_joint - max_log_joint).sum())
 
@@ -175,13 +168,9 @@ def msm_loglikelihood(
             return -np.inf
 
         loglik += log_density
-
         # Update p_{t|t}
         filtered_probs = np.exp(log_joint - log_density)
-
         # Predict p_{t+1|t}
-        #predicted_probs = predict_next_probabilities(filtered_probs, gammas)
-
         predicted_probs = filtered_probs @ transition
         predicted_probs = np.clip(predicted_probs, 1e-300, 1.0)
         predicted_probs /= predicted_probs.sum()
@@ -377,7 +366,7 @@ def msm_probability_integral_transform(
         sigma=params.sigma,
         b=params.b,
         gamma_k=params.gamma_k,
-        mean=fit_result.mean,
+        mean=fit_result.mean_return,
         clip_cdf=clip_cdf,
     )
 
@@ -400,7 +389,7 @@ def msm_filter_from_result(
         sigma=params.sigma,
         b=params.b,
         gamma_k=params.gamma_k,
-        mean=fit_result.mean,
+        mean=fit_result.mean_return,
         clip_cdf=clip_cdf,
     )
 
@@ -449,26 +438,24 @@ def fit_msm(
     k: int,
     n_starts: int = 20,
     seed: int = 123,
+    verbose: bool = True,
 ) -> MSMFitResult:
     """Estimate MSM parameters for one return series and one k."""
     series = pd.to_numeric(returns, errors="coerce").dropna()
     asset = str(series.name or "asset")
 
     # The MSM is estimated on centered percentage returns.
-    y = series - series.mean()
-
+    mean_return = float(series.mean())
+    y = series - mean_return
     rng = np.random.default_rng(seed)
-
     best_result = None
     best_loglik = -np.inf
-
     bounds = [
         (0.05, 1.95),   # m0
         (1e-4, 10.0),   # sigma
         (1.0001, 50.0), # b
         (1e-5, 0.999),  # gamma_k
     ]
-
     initial_points = _initial_points_for_msm(
         y=y,
         k=k,
@@ -476,47 +463,10 @@ def fit_msm(
         rng=rng,
     )
 
-    # for x0 in initial_points:
-    #     opt = minimize(
-    #         _negative_loglikelihood,
-    #         x0=x0,
-    #         args=(y.to_numpy(dtype=float), k),
-    #         method="Nelder-Mead",
-    #         options={
-    #             "maxiter": 5000,
-    #             "xatol": 1e-5,
-    #             "fatol": 1e-5,
-    #         },
-    #     )
-    #     # Nelder-Mead does not enforce bounds, so evaluate only valid points.
-    #     x = opt.x
-    #     if not _params_in_bounds(x, bounds):
-    #         continue
-    #     loglik = -_negative_loglikelihood(x, y.to_numpy(dtype=float), k)
-    #     # Optional local refinement with bounds
-    #     opt_bounded = minimize(
-    #         _negative_loglikelihood,
-    #         x0=x,
-    #         args=(y.to_numpy(dtype=float), k),
-    #         method="L-BFGS-B",
-    #         bounds=bounds,
-    #         options={
-    #             "maxiter": 2000,
-    #             "ftol": 1e-8,
-    #         },
-    #     )
-    #     if opt_bounded.success:
-    #         x = opt_bounded.x
-    #         loglik = -float(opt_bounded.fun)
-    #         opt = opt_bounded
-
-    #     if np.isfinite(loglik) and loglik > best_loglik:
-    #         best_loglik = loglik
-    #         best_result = opt
-
     y_array = y.to_numpy(dtype=float)
     for start_id, x0 in enumerate(initial_points, start=1):
-        print(f"  start {start_id}/{len(initial_points)}: x0={x0}")
+        if verbose:
+            print(f"  start {start_id}/{len(initial_points)}: x0={x0}")
         opt = minimize(
             _negative_loglikelihood,
             x0=x0,
@@ -531,12 +481,13 @@ def fit_msm(
             },
         )
         loglik = -float(opt.fun)
-        print(
-            f"    success={opt.success}, "
-            f"loglik={loglik:.3f}, "
-            f"nit={getattr(opt, 'nit', None)}, "
-            f"nfev={getattr(opt, 'nfev', None)}"
-        )
+        if verbose:
+            print(
+                f"    success={opt.success}, "
+                f"loglik={loglik:.3f}, "
+                f"nit={getattr(opt, 'nit', None)}, "
+                f"nfev={getattr(opt, 'nfev', None)}"
+            )
         if np.isfinite(loglik) and loglik > best_loglik:
             best_loglik = loglik
             best_result = opt
@@ -564,7 +515,7 @@ def fit_msm(
         success=bool(best_result.success),
         message=str(best_result.message),
         nobs=int(series.shape[0]),
-        mean=float(series.mean()),
+        mean_return=mean_return,
     )
 
 
@@ -573,72 +524,46 @@ def fit_msm_grid(
     k_values: range | list[int] = range(1, 8),
     n_starts: int = 20,
     seed: int = 123,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """Estimate MSM for each asset and each k, then return a comparison table."""
     rows = []
 
     for asset in returns.columns:
         for k in k_values:
-            print(f"Estimating MSM: asset={asset}, k={k}, n_starts={n_starts}")
+            if verbose:
+                print(f"Estimating MSM: asset={asset}, k={k}, n_starts={n_starts}")
             result = fit_msm(
                 returns=returns[asset],
                 k=int(k),
                 n_starts=n_starts,
                 seed=seed + 1000 * int(k),
+                verbose=verbose,
             )
 
-            rows.append(
-                {
-                    "asset": result.asset,
-                    "k": result.k,
-                    "mean": result.mean,
-                    "m0": result.params.m0,
-                    "sigma": result.params.sigma,
-                    "b": result.params.b,
-                    "gamma_1": result.params.gamma_1,
-                    "gamma_k": result.params.gamma_k,
-                    "log_likelihood": result.log_likelihood,
-                    "success": result.success,
-                    "message": result.message,
-                    "nobs": result.nobs,
-                }
-            )
+            rows.append(msm_fit_result_to_dict(result))
 
     return pd.DataFrame(rows)
 
 
-def predict_next_probabilities(
-    filtered_probs: np.ndarray,
-    gammas: np.ndarray,
-) -> np.ndarray:
-    """Predict next MSM state probabilities without building the full transition matrix.
-
-    This is mathematically equivalent to multiplying by the 2^k x 2^k transition
-    matrix, but much faster because the transition is a Kronecker product of
-    k independent 2 x 2 transitions.
-    """
-    gammas = np.asarray(gammas, dtype=float)
-    k = len(gammas)
-
-    probs = filtered_probs.reshape((2,) * k)
-
-    for axis, gamma_i in enumerate(gammas):
-        transition_i = np.array(
-            [
-                [1.0 - gamma_i / 2.0, gamma_i / 2.0],
-                [gamma_i / 2.0, 1.0 - gamma_i / 2.0],
-            ],
-            dtype=float,
-        )
-
-        probs = np.tensordot(probs, transition_i, axes=([axis], [0]))
-        probs = np.moveaxis(probs, -1, axis)
-
-    next_probs = probs.reshape(-1)
-    next_probs = np.clip(next_probs, 1e-300, 1.0)
-    next_probs /= next_probs.sum()
-
-    return next_probs
+def msm_fit_result_to_dict(
+    result: MSMFitResult,
+) -> dict[str, float | int | str | bool]:
+    """Convert a MSMFitResult to a flat dictionary for tables."""
+    return {
+        "asset": result.asset,
+        "k": result.k,
+        "mean_return": result.mean_return,
+        "m0": result.params.m0,
+        "sigma": result.params.sigma,
+        "b": result.params.b,
+        "gamma_1": result.params.gamma_1,
+        "gamma_k": result.params.gamma_k,
+        "log_likelihood": result.log_likelihood,
+        "success": result.success,
+        "message": result.message,
+        "nobs": result.nobs,
+    }
 
 
 def _negative_loglikelihood(
@@ -670,41 +595,6 @@ def _negative_loglikelihood(
 
     return -float(loglik)
 
-
-# def _initial_points_for_msm(
-#     y: pd.Series,
-#     k: int,
-#     n_starts: int,
-#     rng: np.random.Generator,
-# ) -> list[np.ndarray]:
-#     """Generate starting values for numerical optimization."""
-#     sample_sigma = float(y.std(ddof=1))
-#     sample_sigma = max(sample_sigma, 1e-2)
-
-#     deterministic = [
-#         np.array([1.50, sample_sigma, 2.0, 0.10]),
-#         np.array([1.50, sample_sigma, 5.0, 0.20]),
-#         np.array([1.40, sample_sigma, 10.0, 0.10]),
-#         np.array([1.60, sample_sigma, 10.0, 0.20]),
-#         np.array([1.30, sample_sigma, 20.0, 0.10]),
-#     ]
-
-#     random_points = []
-
-#     for _ in range(max(0, n_starts - len(deterministic))):
-#         random_points.append(
-#             np.array(
-#                 [
-#                     rng.uniform(1.1, 1.8),          # m0
-#                     sample_sigma * rng.uniform(0.6, 1.6),  # sigma
-#                     rng.uniform(1.2, 30.0),         # b
-#                     rng.uniform(0.02, 0.95),        # gamma_k
-#                 ],
-#                 dtype=float,
-#             )
-#         )
-
-#     return deterministic + random_points
 
 def _initial_points_for_msm(
     y: pd.Series,
@@ -740,13 +630,6 @@ def _initial_points_for_msm(
         )
 
     return points
-
-
-def _params_in_bounds(
-    params: np.ndarray,
-    bounds: list[tuple[float, float]],
-) -> bool:
-    return all(low <= value <= high for value, (low, high) in zip(params, bounds))
 
 
 def _clean_centered_returns(y: pd.Series | np.ndarray) -> np.ndarray:
