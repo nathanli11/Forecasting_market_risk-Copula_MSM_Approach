@@ -195,31 +195,6 @@ def standardize_returns(returns: pd.Series) -> pd.Series:
     return (cleaned - cleaned.mean()) / std
 
 
-def fit_garch_11(returns: pd.Series, mean: str = "Constant", dist: str = "normal"):
-    """Fit a GARCH(1, 1) baseline with the optional `arch` dependency."""
-    try:
-        from arch import arch_model
-    except ImportError as exc:  # pragma: no cover - depends on local env
-        raise ImportError("Install the `arch` package to fit GARCH models.") from exc
-
-    model = arch_model(
-        returns.dropna(),
-        mean=mean,
-        vol="GARCH",
-        p=1,
-        q=1,
-        dist=dist,
-    )
-    return model.fit(disp="off")
-
-
-def one_step_volatility_forecast(fitted_model) -> float:
-    """Extract the next-period conditional volatility forecast from an arch fit."""
-    forecast = fitted_model.forecast(horizon=1)
-    variance = forecast.variance.iloc[-1, 0]
-    return float(variance**0.5 / 100)
-
-
 def pseudo_observations(data: pd.DataFrame | pd.Series) -> pd.DataFrame:
     """Convert observations to empirical CDF ranks in the open unit interval."""
     frame = data.to_frame() if isinstance(data, pd.Series) else data
