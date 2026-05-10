@@ -408,3 +408,108 @@ def forecast_var_oos(
             print(f"  [{i+1}/{n_oos}] VaR_{int(alpha*100)}% = {var_forecasts[i]:.4f}")
  
     return var_forecasts
+
+def christoffersen_lr_test(
+    exceedances: pd.Series | np.ndarray,
+    alpha: float,
+    ) -> dict[str, float]:
+    """
+    Christoffersen (1998) likelihood-ratio backtesting tests.
+ 
+    Computes three tests from the sequence of VaR violation indicators:
+        - uc  : unconditional coverage (Kupiec 1995)
+        - ind : independence of violations
+        - cc  : conditional coverage = uc + ind
+ 
+    Parameters
+    ----------
+    exceedances : array-like of int (0 or 1)
+        Violation indicator: 1 if loss > VaR, 0 otherwise.
+        Length = out-of-sample window (T = 500 in the paper).
+    alpha : float
+        Nominal VaR coverage level (0.05 or 0.01).
+ 
+    Returns
+    -------
+    dict with keys:
+        efv      : empirical frequency of violations (= violations / T)
+        uc_stat  : LR_uc statistic
+        uc_pval  : p-value of LR_uc ~ chi2(1)
+        ind_stat : LR_ind statistic
+        ind_pval : p-value of LR_ind ~ chi2(1)
+        cc_stat  : LR_cc = LR_uc + LR_ind statistic
+        cc_pval  : p-value of LR_cc ~ chi2(2)
+        violations : number of violations
+    """
+    hits = np.asarray(exceedances, dtype=int)
+    T = len(hits)
+ 
+    if T == 0:
+        raise ValueError("exceedances must be non-empty.")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must be in (0, 1).")
+ 
+    n_violations = int(hits.sum())
+    efv = n_violations / T
+ 
+    #  Unconditional coverage (Kupiec)  
+    # H0 : E[I_t] = alpha
+    # LR_uc = -2 * [log L(alpha) - log L(p_hat)]
+    p_hat = efv
+ 
+    if n_violations == 0 or n_violations == T:
+        lr_uc = 0.0
+    else:
+        log_l_restricted = (n_violations * np.log(alpha)
+                               + (T - n_violations) * np.log(1 - alpha))
+        log_l_unrestricted = (n_violations * np.log(p_hat)
+                               + (T - n_violations) * np.log(1 - p_hat))
+        lr_uc = -2.0 * (log_l_restricted - log_l_unrestricted)
+ 
+    uc_pval = float(1 - stats.chi2.cdf(lr_uc, df=1))
+ 
+    # ── Independence (Christoffersen 1998) ───────────────────────────
+    # Build transition counts from the violation sequence
+    # n_ij = number of transitions from state i to state j
+    n00 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 0)))
+    n01 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 1)))
+    n10 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 0)))
+    n11 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 1)))
+ 
+    # Transition probabilities under H1 (Markov chain)
+    pi01 = n01 / (n00 + n01) if (n00 + n01) > 0 else 0.0
+    pi11 = n11 / (n10 + n11) if (n10 + n11) > 0 else 0.0
+    pi = (n01 + n11) / (n00 + n01 + n10 + n11)  # overall violation prob
+ 
+    # Log-likelihoods
+    def _safe_log(x: float) -> float:
+        return np.log(x) if x > 0 else 0.0
+ 
+    log_l_h1 = (
+        n00 * _safe_log(1 - pi01) + n01 * _safe_log(pi01)
+        + n10 * _safe_log(1 - pi11) + n11 * _safe_log(pi11)
+    )
+    log_l_h0 = (
+        (n00 + n10) * _safe_log(1 - pi)
+        + (n01 + n11) * _safe_log(pi)
+    )
+ 
+    lr_ind  = -2.0 * (log_l_h0 - log_l_h1)
+    lr_ind  = max(lr_ind, 0.0)   # numerical safety
+    ind_pval = float(1 - stats.chi2.cdf(lr_ind, df=1))
+ 
+    #   Conditional coverage  
+    # LR_cc = LR_uc + LR_ind ~ chi2(2) under H0
+    lr_cc   = lr_uc + lr_ind
+    cc_pval = float(1 - stats.chi2.cdf(lr_cc, df=2))
+ 
+    return {
+        "efv": round(efv, 4),
+        "uc_stat": round(lr_uc, 4),
+        "uc_pval": round(uc_pval, 4),
+        "ind_stat": round(lr_ind, 4),
+        "ind_pval": round(ind_pval, 4),
+        "cc_stat": round(lr_cc, 4),
+        "cc_pval": round(cc_pval, 4),
+        "violations": n_violations,
+    }
