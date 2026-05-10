@@ -12,6 +12,7 @@ from scipy.stats import multivariate_normal, multivariate_t, norm, t
 
 EPS = 1e-10
 
+
 @dataclass(frozen=True)
 class CopulaFitResult:
     """Container for an estimated bivariate copula."""
@@ -178,7 +179,9 @@ def frank_copula_logpdf(uniforms: pd.DataFrame, theta: float) -> np.ndarray:
     ) ** 2
 
     density = numerator / denominator
-    density = np.maximum(density, EPS)
+
+    if np.any(~np.isfinite(density)) or np.any(density <= 0):
+        return np.full(len(frame), -np.inf)
 
     return np.log(density)
 
@@ -206,8 +209,13 @@ def plackett_copula_logpdf(uniforms: pd.DataFrame, theta: float) -> np.ndarray:
     )
 
     numerator = theta * (1.0 + a * (u + v - 2.0 * u * v))
+    if np.any(denominator_base <= 0) or np.any(~np.isfinite(denominator_base)):
+        return np.full(len(frame), -np.inf)
+
     density = numerator / (denominator_base ** 1.5)
-    density = np.maximum(density, EPS)
+
+    if np.any(~np.isfinite(density)) or np.any(density <= 0):
+        return np.full(len(frame), -np.inf)
 
     return np.log(density)
 
@@ -264,7 +272,7 @@ def _negative_loglikelihood(
     return -float(np.sum(logpdf))
 
 
-def _initial_and_bounds(
+def _initial_points_and_bounds(
     copula: str,
     uniforms: pd.DataFrame,
 ) -> tuple[list[np.ndarray], list[tuple[float, float]]]:
@@ -355,10 +363,12 @@ def fit_copula(
     """Estimate one bivariate copula by maximum likelihood."""
     frame = _validate_uniforms(uniforms)
 
-    initial_points, bounds = _initial_and_bounds(copula, frame)
+    initial_points, bounds = _initial_points_and_bounds(copula, frame)
 
     best_opt = None
     best_fun = np.inf
+    fallback_opt = None
+    fallback_fun = np.inf
 
     for x0 in initial_points:
         opt = minimize(
@@ -369,11 +379,15 @@ def fit_copula(
             bounds=bounds,
             options={"maxiter": 3000, "ftol": 1e-10},
         )
-
-        if np.isfinite(opt.fun) and opt.fun < best_fun:
+        if np.isfinite(opt.fun) and opt.fun < fallback_fun:
+            fallback_fun = float(opt.fun)
+            fallback_opt = opt
+        if opt.success and np.isfinite(opt.fun) and opt.fun < best_fun:
             best_fun = float(opt.fun)
             best_opt = opt
 
+    if best_opt is None:
+        best_opt = fallback_opt
     if best_opt is None:
         raise RuntimeError(f"Copula estimation failed for {copula}.")
 
@@ -502,193 +516,33 @@ def format_copula_table_4(table: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-def _sample_student_copula(
-    rho: float,
-    nu: float,
-    n_samples: int,
-    rng: np.random.Generator,
-    )-> tuple[np.ndarray, np.ndarray]:
-    """Sample (u1, u2) from a bivariate Student-t copula"""
-    cov = np.array([[1.0, rho], [rho, 1.0]])
-    z = rng.multivariate_normal(mean=[0.0, 0.0], cov = cov, size = n_samples)
-    chi2 = rng.chisquare(df=nu, size=n_samples)
-    x = z * np.sqrt(nu / chi2[:, None])
-    return t.cdf(x[:,0], df=nu), t.cdf(x[:,1], df=nu)
 
-def _sample_gaussian_copula(
-    rho: float,
-    n_samples: int,
-    rng: np.random.Generator,
-    ) -> tuple[np.ndarray, np.ndarray]:
-    """Sample (u1, u2) from a bivariate Gaussian copula."""
-    cov = np.array([[1.0, rho], [rho, 1.0]])
-    z = rng.multivariate_normal(mean=[0.0, 0.0], cov=cov, size=n_samples)
-    return norm.cdf(z[:, 0]), norm.cdf(z[:, 1])
+def pseudo_observations(data: pd.DataFrame | pd.Series) -> pd.DataFrame:
+    """Convert observations to empirical CDF ranks in the open unit interval."""
+    frame = data.to_frame() if isinstance(data, pd.Series) else data
+    ranks = frame.rank(method="average", pct=False)
+    return ranks / (len(frame) + 1.0)
 
-def _msm_quantile(
-    u: np.ndarray,
-    state_probs: np.ndarray,
-    sigma: float,
-    h: np.ndarray,
-    ) -> np.ndarray:
-    """
-    Invert the MSM conditional CDF
-    F(y | I_{t-1}) = sum_j P(M_{t-1}=m_j | I_{t-1}) * Phi(y / (sigma*h_j))
-    Inverted on a fine grid via linear interpolation.
-    """
-    y_grid = np.linspace(-15.0, 15.0, 5000)
-    cdf_grid = np.sum(
-        state_probs[:, None] * norm.cdf(y_grid[None, :] / (sigma * h[:, None])),
-        axis=0,
+
+def gaussian_copula_correlation(uniforms: pd.DataFrame) -> pd.DataFrame:
+    """Estimate a Gaussian copula correlation matrix from pseudo-observations."""
+    if not ((uniforms > 0) & (uniforms < 1)).all().all():
+        raise ValueError("Gaussian copula inputs must lie strictly between 0 and 1.")
+    normal_scores = pd.DataFrame(
+        norm.ppf(uniforms),
+        index=uniforms.index,
+        columns=uniforms.columns,
     )
-    return np.interp(u, cdf_grid, y_grid)
- 
-def portfolio_var_mc(
-    state_probs_1: np.ndarray,
-    state_probs_2: np.ndarray,
-    sigma_1: float,
-    sigma_2: float,
-    h_1: np.ndarray,
-    h_2: np.ndarray,
-    copula_params: dict,
-    copula: str = "student",
-    pi: float = 0.5,
-    alpha: float = 0.05,
-    n_samples: int = 10_000,
-    seed: int | None = None,
-    )-> float:
-    """
-    Portfolio VaR at level alpha via Monte Carlo — Eq. (12)-(13).
- 
-    Steps:
-        1. Sample (u1, u2) from the fitted copula
-        2. Map to returns via MSM inverse CDF
-        3. r_p = pi*r1 + (1-pi)*r2
-        4. VaR = quantile(r_p, alpha)
- 
-    Parameters
-    ----------
-    state_probs_1/2 : np.ndarray
-        Filtered state probabilities P(M_{t-1}=m_j | I_{t-1}) for each asset.
-    sigma_1/2 : float
-        MSM scale parameter for each asset.
-    h_1/2 : np.ndarray
-        h(m_j) = sqrt(prod(m_j^i)) for each state.
-    copula_params : dict
-        {"rho": ..., "nu": ...} for Student, {"rho": ...} for Gaussian.
-    copula : str
-        "student" or "gaussian".
-    pi : float
-        Weight on asset 1. Paper uses pi=0.5.
-    alpha : float
-        VaR level. Paper uses 0.01 and 0.05.
-    n_samples : int
-        Monte Carlo draws. 10_000 gives good precision.
-    seed : int or None
-        Random seed.
- 
-    Returns
-    -------
-    float
-        VaR_t(alpha) — signed return (negative = loss).
-    """
-    rng = np.random.default_rng(seed)
-    if copula == "student":
-        u1, u2 = _sample_student_copula(
-            rho = copula_params["rho"],
-            nu=copula_params["nu"],
-            n_samples=n_samples,
-            rng=rng
-        )
-    elif copula=="gaussian":
-        u1, u2 = _sample_gaussian_copula(
-            rho = copula_params["rho"],
-            n_samples=n_samples,
-            rng=rng
-        )
-    else:
-        raise ValueError("Unsupported copula. Use student or gaussian")
-    
-    r1 = _msm_quantile(u1, state_probs_1, sigma_1, h_1)
-    r2 = _msm_quantile(u2, state_probs_2, sigma_2, h_2)
-    r_p = pi * r1 + (1.0 - pi)*r2
-    return float(np.quantile(r_p, alpha))
+    return normal_scores.corr()
 
 
-def _portfolio_cdf_mc(
-    var_candidate: float,
-    state_probs_1: np.ndarray,
-    state_probs_2: np.ndarray,
-    sigma_1: float,
-    sigma_2: float,
-    h_1: np.ndarray,
-    h_2: np.ndarray,
-    copula_params: dict,
-    copula: str,
-    pi: float,
+def simulate_gaussian_copula(
+    correlation: pd.DataFrame | np.ndarray,
     n_samples: int,
-    rng: np.random.Generator,
-    ) -> float:
-    """Estimate Pr(r_p <= var_candidate) via MC for use in Brent solver."""
-    if copula == "student":
-        u1, u2 = _sample_student_copula(
-            rho=copula_params["rho"],
-            nu=copula_params["nu"],
-            n_samples=n_samples,
-            rng=rng,
-        )
-    else:
-        u1, u2 = _sample_gaussian_copula(
-            rho=copula_params["rho"],
-            n_samples=n_samples,
-            rng=rng,
-        )
- 
-    r1  = _msm_quantile(u1, state_probs_1, sigma_1, h_1)
-    r2  = _msm_quantile(u2, state_probs_2, sigma_2, h_2)
-    r_p = pi * r1 + (1.0 - pi) * r2
- 
-    return float(np.mean(r_p <= var_candidate))
-
-
-def portfolio_var_brent(
-    state_probs_1: np.ndarray,
-    state_probs_2: np.ndarray,
-    sigma_1: float,
-    sigma_2: float,
-    h_1: np.ndarray,
-    h_2: np.ndarray,
-    copula_params: dict,
-    copula: str = "student",
-    pi: float = 0.5,
-    alpha: float = 0.05,
-    n_samples: int = 50_000,
-    bracket: tuple[float, float] = (-20.0, 5.0),
-    seed: int | None = 0,
-) -> float:
-    """
-    Portfolio VaR via Brent root-finding on the portfolio CDF — Eq. (15).
- 
-    Solves: Pr(r_p <= VaR) - alpha = 0
- 
-    Parameters
-    ----------
-    n_samples : int
-        MC draws for CDF evaluation at each Brent iteration.
-    bracket : tuple
-        (a, b) search interval. Must satisfy F_p(a) < alpha < F_p(b).
-    """
+    seed: int | None = None,
+) -> np.ndarray:
+    """Simulate uniforms from a Gaussian copula."""
     rng = np.random.default_rng(seed)
- 
-    def objective(v: float) -> float:
-        return _portfolio_cdf_mc(
-            v,
-            state_probs_1, state_probs_2,
-            sigma_1, sigma_2,
-            h_1, h_2,
-            copula_params, copula,
-            pi, n_samples, rng,
-        ) - alpha
- 
-    return float(brentq(objective, bracket[0], bracket[1], xtol=1e-3, maxiter=20))
- 
+    corr = np.asarray(correlation, dtype=float)
+    draws = rng.multivariate_normal(np.zeros(corr.shape[0]), corr, size=n_samples)
+    return norm.cdf(draws)

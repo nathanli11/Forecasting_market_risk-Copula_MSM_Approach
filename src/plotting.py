@@ -194,3 +194,100 @@ def plot_returns_and_squared_returns(
         save_plotly_figure(fig, output_path)
 
     return fig
+
+
+def plot_var_forecasts(
+    portfolio_returns: pd.Series,
+    var_forecasts: pd.DataFrame | pd.Series,
+    output_path: str | Path | None = None,
+    title: str = "VaR forecasts vs portfolio returns",
+    positive_loss_var: bool = True,
+) -> go.Figure:
+    """Plot portfolio returns and VaR forecasts.
+
+    This is intended to reproduce Figure 3-style VaR plots.
+
+    Parameters
+    ----------
+    portfolio_returns:
+        Portfolio return series, usually in percentage points.
+    var_forecasts:
+        VaR forecasts. If VaR is stored as a positive loss number, set
+        positive_loss_var=True so that the plotted threshold is -VaR.
+    output_path:
+        Optional path used to save the figure.
+    title:
+        Figure title.
+    positive_loss_var:
+        If True, VaR forecasts are interpreted as positive losses and plotted
+        with a negative sign. This matches the return-axis convention of the
+        paper's VaR figures.
+
+    Returns
+    -------
+    go.Figure
+        Plotly figure.
+    """
+    returns = pd.to_numeric(portfolio_returns, errors="coerce").dropna()
+    returns.name = returns.name or "Portfolio returns"
+
+    if isinstance(var_forecasts, pd.Series):
+        var_frame = var_forecasts.to_frame()
+    else:
+        var_frame = var_forecasts.copy()
+
+    var_frame = var_frame.apply(pd.to_numeric, errors="coerce")
+
+    common_index = returns.index.intersection(var_frame.dropna(how="all").index)
+    returns = returns.loc[common_index]
+    var_frame = var_frame.loc[common_index]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=returns.index,
+            y=returns.to_numpy(),
+            mode="lines",
+            name=returns.name,
+            line={"width": 1.2},
+        )
+    )
+
+    for column in var_frame.columns:
+        series = var_frame[column].dropna()
+
+        y_values = -series.to_numpy() if positive_loss_var else series.to_numpy()
+
+        fig.add_trace(
+            go.Scatter(
+                x=series.index,
+                y=y_values,
+                mode="lines",
+                name=str(column),
+                line={"width": 1.4},
+            )
+        )
+
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        xaxis_title="",
+        yaxis_title="Return (%)",
+        hovermode="x unified",
+        legend={
+            "x": 0.02,
+            "y": 0.02,
+            "xanchor": "left",
+            "yanchor": "bottom",
+            "bgcolor": "rgba(255,255,255,0.8)",
+            "bordercolor": "black",
+            "borderwidth": 1,
+        },
+        margin={"l": 70, "r": 30, "t": 70, "b": 50},
+    )
+
+    if output_path is not None:
+        save_plotly_figure(fig, output_path)
+
+    return fig

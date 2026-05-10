@@ -9,7 +9,6 @@ import pandas as pd
 from scipy import stats
 from statsmodels.stats.diagnostic import het_arch
 from statsmodels.tsa.stattools import adfuller
-from copulas import portfolio_var_mc, portfolio_var_brent
 
 def summary_statistics(
     returns: pd.DataFrame | pd.Series,
@@ -196,37 +195,6 @@ def standardize_returns(returns: pd.Series) -> pd.Series:
     return (cleaned - cleaned.mean()) / std
 
 
-def pseudo_observations(data: pd.DataFrame | pd.Series) -> pd.DataFrame:
-    """Convert observations to empirical CDF ranks in the open unit interval."""
-    frame = data.to_frame() if isinstance(data, pd.Series) else data
-    ranks = frame.rank(method="average", pct=False)
-    return ranks / (len(frame) + 1.0)
-
-
-def gaussian_copula_correlation(uniforms: pd.DataFrame) -> pd.DataFrame:
-    """Estimate a Gaussian copula correlation matrix from pseudo-observations."""
-    if not ((uniforms > 0) & (uniforms < 1)).all().all():
-        raise ValueError("Gaussian copula inputs must lie strictly between 0 and 1.")
-    normal_scores = pd.DataFrame(
-        stats.norm.ppf(uniforms),
-        index=uniforms.index,
-        columns=uniforms.columns,
-    )
-    return normal_scores.corr()
-
-
-def simulate_gaussian_copula(
-    correlation: pd.DataFrame | np.ndarray,
-    n_samples: int,
-    seed: int | None = None,
-) -> np.ndarray:
-    """Simulate uniforms from a Gaussian copula."""
-    rng = np.random.default_rng(seed)
-    corr = np.asarray(correlation, dtype=float)
-    draws = rng.multivariate_normal(np.zeros(corr.shape[0]), corr, size=n_samples)
-    return stats.norm.cdf(draws)
-
-
 def historical_var(returns: pd.Series | np.ndarray, alpha: float = 0.01) -> float:
     """Historical VaR as a positive loss number at tail probability alpha."""
     _validate_alpha(alpha)
@@ -285,26 +253,156 @@ def kupiec_pof_test(
     exceedances: pd.Series | np.ndarray,
     alpha: float,
 ) -> dict[str, float]:
-    """Kupiec unconditional coverage likelihood-ratio test."""
+    """Kupiec unconditional coverage likelihood-ratio test.
+
+    Tests whether the observed violation frequency equals the nominal
+    probability alpha.
+
+    H0:
+        P(I_t = 1) = alpha
+
+    LR_uc ~ chi2(1)
+    """
+    _validate_alpha(alpha)
+
     hits = np.asarray(exceedances, dtype=int)
+
     if hits.size == 0:
         raise ValueError("At least one exceedance indicator is required.")
-    x = int(hits.sum())
+
+    if not np.isin(hits, [0, 1]).all():
+        raise ValueError("Exceedances must contain only 0 and 1 values.")
+
     n = int(hits.size)
+    x = int(hits.sum())
     phat = x / n
 
-    if x == 0 or x == n:
-        log_l_unrestricted = 0.0
-    else:
-        log_l_unrestricted = x * math.log(phat) + (n - x) * math.log(1 - phat)
+    log_l_restricted = _bernoulli_loglik(
+        successes=x,
+        trials=n,
+        probability=alpha,
+    )
 
-    log_l_restricted = x * math.log(alpha) + (n - x) * math.log(1 - alpha)
-    statistic = -2 * (log_l_restricted - log_l_unrestricted)
-    pvalue = 1 - stats.chi2.cdf(statistic, df=1)
+    log_l_unrestricted = _bernoulli_loglik(
+        successes=x,
+        trials=n,
+        probability=phat,
+    )
+
+    statistic = -2.0 * (log_l_restricted - log_l_unrestricted)
+    statistic = max(float(statistic), 0.0)
+
+    pvalue = 1.0 - stats.chi2.cdf(statistic, df=1)
+
     return {
         "statistic": float(statistic),
         "pvalue": float(pvalue),
         "violations": float(x),
+        "nobs": float(n),
+        "violation_rate": float(phat),
+    }
+
+
+def christoffersen_lr_test(
+    exceedances: pd.Series | np.ndarray,
+    alpha: float,
+) -> dict[str, float]:
+    """Christoffersen likelihood-ratio VaR backtesting tests.
+
+    Computes:
+        - LR_uc  : unconditional coverage, equivalent to Kupiec POF test
+        - LR_ind : independence of violations
+        - LR_cc  : conditional coverage = LR_uc + LR_ind
+
+    Under the null:
+        LR_uc  ~ chi2(1)
+        LR_ind ~ chi2(1)
+        LR_cc  ~ chi2(2)
+    """
+    _validate_alpha(alpha)
+
+    hits = np.asarray(exceedances, dtype=int)
+
+    if hits.size == 0:
+        raise ValueError("exceedances must be non-empty.")
+
+    if not np.isin(hits, [0, 1]).all():
+        raise ValueError("Exceedances must contain only 0 and 1 values.")
+
+    nobs = int(hits.size)
+    n_violations = int(hits.sum())
+    efv = n_violations / nobs
+
+    # Unconditional coverage
+    log_l_restricted = _bernoulli_loglik(
+        successes=n_violations,
+        trials=nobs,
+        probability=alpha,
+    )
+
+    log_l_unrestricted = _bernoulli_loglik(
+        successes=n_violations,
+        trials=nobs,
+        probability=efv,
+    )
+
+    lr_uc = -2.0 * (log_l_restricted - log_l_unrestricted)
+    lr_uc = max(float(lr_uc), 0.0)
+    uc_pvalue = 1.0 - stats.chi2.cdf(lr_uc, df=1)
+
+    # Independence test
+    if nobs < 2:
+        raise ValueError("At least two exceedance observations are required.")
+
+    previous_hits = hits[:-1]
+    current_hits = hits[1:]
+
+    n00 = int(np.sum((previous_hits == 0) & (current_hits == 0)))
+    n01 = int(np.sum((previous_hits == 0) & (current_hits == 1)))
+    n10 = int(np.sum((previous_hits == 1) & (current_hits == 0)))
+    n11 = int(np.sum((previous_hits == 1) & (current_hits == 1)))
+
+    n0 = n00 + n01
+    n1 = n10 + n11
+    n_transitions = n0 + n1
+
+    pi01 = n01 / n0 if n0 > 0 else 0.0
+    pi11 = n11 / n1 if n1 > 0 else 0.0
+    pi = (n01 + n11) / n_transitions if n_transitions > 0 else 0.0
+
+    log_l_ind_unrestricted = (
+        _binomial_component_loglik(n01, n0, pi01)
+        + _binomial_component_loglik(n11, n1, pi11)
+    )
+
+    log_l_ind_restricted = _bernoulli_loglik(
+        successes=n01 + n11,
+        trials=n_transitions,
+        probability=pi,
+    )
+
+    lr_ind = -2.0 * (log_l_ind_restricted - log_l_ind_unrestricted)
+    lr_ind = max(float(lr_ind), 0.0)
+    ind_pvalue = 1.0 - stats.chi2.cdf(lr_ind, df=1)
+
+    # Conditional coverage
+    lr_cc = lr_uc + lr_ind
+    cc_pvalue = 1.0 - stats.chi2.cdf(lr_cc, df=2)
+
+    return {
+        "efv": float(efv),
+        "uc_stat": float(lr_uc),
+        "uc_pvalue": float(uc_pvalue),
+        "ind_stat": float(lr_ind),
+        "ind_pvalue": float(ind_pvalue),
+        "cc_stat": float(lr_cc),
+        "cc_pvalue": float(cc_pvalue),
+        "violations": float(n_violations),
+        "nobs": float(nobs),
+        "n00": float(n00),
+        "n01": float(n01),
+        "n10": float(n10),
+        "n11": float(n11),
     }
 
 
@@ -320,196 +418,41 @@ def _clean_returns(returns: pd.Series | np.ndarray) -> np.ndarray:
         raise ValueError("At least one return observation is required.")
     return values
 
-def forecast_var_oos(
-    msm_1,
-    msm_2,
-    returns_1: pd.Series,
-    returns_2: pd.Series,
-    copula_params: dict,
-    copula: str = "student",
-    pi: float = 0.5,
-    alpha: float = 0.05,
-    n_oos: int = 500,
-    method: str = "mc",
-    n_samples: int = 10_000,
-    seed: int | None = 42,
-) -> np.ndarray:
-    """
-    One-step-ahead VaR forecasts over the out-of-sample window.
- 
-    Paper setup:
-        - T = 1635 total observations
-        - n_oos = 500 out-of-sample periods
-        - In-sample = first 1135, out-of-sample = last 500
- iod (ignored if method="brent").
-    
-    """
-    from msm import msm_filter_from_result, make_msm_states
- 
-    # Run the Hamilton filter on the full series for each asset
-    filter_1 = msm_filter_from_result(returns_1, msm_1)
-    filter_2 = msm_filter_from_result(returns_2, msm_2)
- 
-    # predicted_probs shape: (T, n_states) — P(M_t = m_j | I_{t-1})
-    predicted_probs_1 = filter_1["predicted_probs"].to_numpy()
-    predicted_probs_2 = filter_2["predicted_probs"].to_numpy()
- 
-    # Precompute h(m_j) = sqrt(prod(m_j)) for each state
-    states_1 = make_msm_states(k=msm_1.k, m0=msm_1.params.m0)
-    states_2 = make_msm_states(k=msm_2.k, m0=msm_2.params.m0)
-    h_1 = np.sqrt(np.prod(states_1, axis=1))
-    h_2 = np.sqrt(np.prod(states_2, axis=1))
- 
-    sigma_1 = msm_1.params.sigma
-    sigma_2 = msm_2.params.sigma
- 
-    T = predicted_probs_1.shape[0]
-    t_start = T - n_oos
-    var_forecasts = np.zeros(n_oos)
- 
-    for i in range(n_oos):
-        t   = t_start + i
-        sp1 = predicted_probs_1[t]
-        sp2 = predicted_probs_2[t]
- 
-        if method == "mc":
-            var_forecasts[i] = portfolio_var_mc(
-                state_probs_1=sp1,
-                state_probs_2=sp2,
-                sigma_1=sigma_1,
-                sigma_2=sigma_2,
-                h_1=h_1,
-                h_2=h_2,
-                copula_params=copula_params,
-                copula=copula,
-                pi=pi,
-                alpha=alpha,
-                n_samples=n_samples,
-                seed=seed + i if seed is not None else None,
-            )
-        elif method == "brent":
-            var_forecasts[i] = portfolio_var_brent(
-                state_probs_1=sp1,
-                state_probs_2=sp2,
-                sigma_1=sigma_1,
-                sigma_2=sigma_2,
-                h_1=h_1,
-                h_2=h_2,
-                copula_params=copula_params,
-                copula=copula,
-                pi=pi,
-                alpha=alpha,
-                seed=seed + i if seed is not None else None,
-            )
-        else:
-            raise ValueError("method must be 'mc' or 'brent'")
- 
-        if (i + 1) % 50 == 0:
-            print(f"  [{i+1}/{n_oos}] VaR_{int(alpha*100)}% = {var_forecasts[i]:.4f}")
- 
-    return var_forecasts
 
-def christoffersen_lr_test(
-    exceedances: pd.Series | np.ndarray,
-    alpha: float,
-    ) -> dict[str, float]:
-    """
-    Christoffersen (1998) likelihood-ratio backtesting tests.
- 
-    Computes three tests from the sequence of VaR violation indicators:
-        - uc  : unconditional coverage (Kupiec 1995)
-        - ind : independence of violations
-        - cc  : conditional coverage = uc + ind
- 
-    Parameters
-    ----------
-    exceedances : array-like of int (0 or 1)
-        Violation indicator: 1 if loss > VaR, 0 otherwise.
-        Length = out-of-sample window (T = 500 in the paper).
-    alpha : float
-        Nominal VaR coverage level (0.05 or 0.01).
- 
-    Returns
-    -------
-    dict with keys:
-        efv      : empirical frequency of violations (= violations / T)
-        uc_stat  : LR_uc statistic
-        uc_pval  : p-value of LR_uc ~ chi2(1)
-        ind_stat : LR_ind statistic
-        ind_pval : p-value of LR_ind ~ chi2(1)
-        cc_stat  : LR_cc = LR_uc + LR_ind statistic
-        cc_pval  : p-value of LR_cc ~ chi2(2)
-        violations : number of violations
-    """
-    hits = np.asarray(exceedances, dtype=int)
-    T = len(hits)
- 
-    if T == 0:
-        raise ValueError("exceedances must be non-empty.")
-    if not 0 < alpha < 1:
-        raise ValueError("alpha must be in (0, 1).")
- 
-    n_violations = int(hits.sum())
-    efv = n_violations / T
- 
-    #  Unconditional coverage (Kupiec)  
-    # H0 : E[I_t] = alpha
-    # LR_uc = -2 * [log L(alpha) - log L(p_hat)]
-    p_hat = efv
- 
-    if n_violations == 0 or n_violations == T:
-        lr_uc = 0.0
-    else:
-        log_l_restricted = (n_violations * np.log(alpha)
-                               + (T - n_violations) * np.log(1 - alpha))
-        log_l_unrestricted = (n_violations * np.log(p_hat)
-                               + (T - n_violations) * np.log(1 - p_hat))
-        lr_uc = -2.0 * (log_l_restricted - log_l_unrestricted)
- 
-    uc_pval = float(1 - stats.chi2.cdf(lr_uc, df=1))
- 
-    # ── Independence (Christoffersen 1998) ───────────────────────────
-    # Build transition counts from the violation sequence
-    # n_ij = number of transitions from state i to state j
-    n00 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 0)))
-    n01 = int(np.sum((hits[:-1] == 0) & (hits[1:] == 1)))
-    n10 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 0)))
-    n11 = int(np.sum((hits[:-1] == 1) & (hits[1:] == 1)))
- 
-    # Transition probabilities under H1 (Markov chain)
-    pi01 = n01 / (n00 + n01) if (n00 + n01) > 0 else 0.0
-    pi11 = n11 / (n10 + n11) if (n10 + n11) > 0 else 0.0
-    pi = (n01 + n11) / (n00 + n01 + n10 + n11)  # overall violation prob
- 
-    # Log-likelihoods
-    def _safe_log(x: float) -> float:
-        return np.log(x) if x > 0 else 0.0
- 
-    log_l_h1 = (
-        n00 * _safe_log(1 - pi01) + n01 * _safe_log(pi01)
-        + n10 * _safe_log(1 - pi11) + n11 * _safe_log(pi11)
+def _bernoulli_loglik(
+    successes: int,
+    trials: int,
+    probability: float,
+) -> float:
+    """Bernoulli log-likelihood with boundary-safe probabilities."""
+    if trials < 0:
+        raise ValueError("trials must be non-negative.")
+    if not 0 <= successes <= trials:
+        raise ValueError("successes must be between 0 and trials.")
+
+    p = float(np.clip(probability, 1e-12, 1.0 - 1e-12))
+
+    return float(
+        successes * np.log(p)
+        + (trials - successes) * np.log(1.0 - p)
     )
-    log_l_h0 = (
-        (n00 + n10) * _safe_log(1 - pi)
-        + (n01 + n11) * _safe_log(pi)
+
+
+def _binomial_component_loglik(
+    successes: int,
+    trials: int,
+    probability: float,
+) -> float:
+    """Boundary-safe binomial log-likelihood contribution.
+
+    This is useful for Christoffersen transition likelihoods, where one
+    transition row may contain zero observations.
+    """
+    if trials == 0:
+        return 0.0
+
+    return _bernoulli_loglik(
+        successes=successes,
+        trials=trials,
+        probability=probability,
     )
- 
-    lr_ind  = -2.0 * (log_l_h0 - log_l_h1)
-    lr_ind  = max(lr_ind, 0.0)   # numerical safety
-    ind_pval = float(1 - stats.chi2.cdf(lr_ind, df=1))
- 
-    #   Conditional coverage  
-    # LR_cc = LR_uc + LR_ind ~ chi2(2) under H0
-    lr_cc   = lr_uc + lr_ind
-    cc_pval = float(1 - stats.chi2.cdf(lr_cc, df=2))
- 
-    return {
-        "efv": round(efv, 4),
-        "uc_stat": round(lr_uc, 4),
-        "uc_pval": round(uc_pval, 4),
-        "ind_stat": round(lr_ind, 4),
-        "ind_pval": round(ind_pval, 4),
-        "cc_stat": round(lr_cc, 4),
-        "cc_pval": round(cc_pval, 4),
-        "violations": n_violations,
-    }
