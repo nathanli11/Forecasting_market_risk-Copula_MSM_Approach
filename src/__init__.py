@@ -73,8 +73,13 @@ from src.copulas import (
 )
 from src.var import (
     forecast_msm_copula_var_oos_fixed_params,
-    portfolio_var_brent,
     portfolio_var_mc,
+    forecast_historical_var,
+    forecast_variance_covariance_var,
+    forecast_riskmetrics_var,
+    forecast_ccc_garch_var_fixed_params,
+    forecast_garch_copula_var_fixed_params,
+    portfolio_var_root,
 )
 from src.plotting import (
     plot_price_evolution,
@@ -174,8 +179,13 @@ __all__ = [
 
     # VaR
     "forecast_msm_copula_var_oos_fixed_params",
-    "portfolio_var_brent",
     "portfolio_var_mc",
+    "forecast_historical_var",
+    "forecast_variance_covariance_var",
+    "forecast_riskmetrics_var",
+    "forecast_ccc_garch_var_fixed_params",
+    "forecast_garch_copula_var_fixed_params",
+    "portfolio_var_root",
 
     # plotting
     "plot_price_evolution",

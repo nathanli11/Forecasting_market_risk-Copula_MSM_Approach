@@ -199,8 +199,7 @@ def historical_var(returns: pd.Series | np.ndarray, alpha: float = 0.01) -> floa
     """Historical VaR as a positive loss number at tail probability alpha."""
     _validate_alpha(alpha)
     values = _clean_returns(returns)
-    quantile = np.quantile(values, alpha)
-    return float(max(-quantile, 0.0))
+    return float(np.quantile(values, alpha))
 
 
 def gaussian_var(
@@ -216,8 +215,7 @@ def gaussian_var(
     sigma = float(values.std(ddof=1)) if volatility is None else float(volatility)
     if sigma < 0:
         raise ValueError("volatility must be non-negative.")
-    quantile = mu + sigma * stats.norm.ppf(alpha)
-    return float(max(-quantile, 0.0))
+    return float(mu + sigma * stats.norm.ppf(alpha))
 
 
 def portfolio_returns(
@@ -234,14 +232,22 @@ def portfolio_returns(
 
 
 def var_exceedances(returns: pd.Series, var_forecasts: pd.Series | float) -> pd.Series:
-    """Indicator for losses exceeding positive VaR forecasts."""
+    """Indicator for VaR violations under signed return VaR convention.
+
+    A violation occurs when:
+        r_t < VaR_t(alpha).
+    """
     forecasts = (
         pd.Series(var_forecasts, index=returns.index)
         if np.isscalar(var_forecasts)
         else var_forecasts.reindex(returns.index)
     )
-    losses = -returns
-    return losses.gt(forecasts).astype(int)
+
+    aligned = pd.concat([returns, forecasts], axis=1).dropna()
+    aligned_returns = aligned.iloc[:, 0]
+    aligned_forecasts = aligned.iloc[:, 1]
+
+    return aligned_returns.lt(aligned_forecasts).astype(int)
 
 
 def violation_rate(returns: pd.Series, var_forecasts: pd.Series | float) -> float:

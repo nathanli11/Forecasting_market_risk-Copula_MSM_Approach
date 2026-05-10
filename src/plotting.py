@@ -201,7 +201,7 @@ def plot_var_forecasts(
     var_forecasts: pd.DataFrame | pd.Series,
     output_path: str | Path | None = None,
     title: str = "VaR forecasts vs portfolio returns",
-    positive_loss_var: bool = True,
+    positive_loss_var: bool = False,
 ) -> go.Figure:
     """Plot portfolio returns and VaR forecasts.
 
