@@ -9,6 +9,7 @@ import pandas as pd
 from scipy import stats
 from statsmodels.stats.diagnostic import het_arch
 from statsmodels.tsa.stattools import adfuller
+from copulas import portfolio_var_mc, portfolio_var_brent
 
 def summary_statistics(
     returns: pd.DataFrame | pd.Series,
@@ -318,3 +319,92 @@ def _clean_returns(returns: pd.Series | np.ndarray) -> np.ndarray:
     if values.size == 0:
         raise ValueError("At least one return observation is required.")
     return values
+
+def forecast_var_oos(
+    msm_1,
+    msm_2,
+    returns_1: pd.Series,
+    returns_2: pd.Series,
+    copula_params: dict,
+    copula: str = "student",
+    pi: float = 0.5,
+    alpha: float = 0.05,
+    n_oos: int = 500,
+    method: str = "mc",
+    n_samples: int = 10_000,
+    seed: int | None = 42,
+) -> np.ndarray:
+    """
+    One-step-ahead VaR forecasts over the out-of-sample window.
+ 
+    Paper setup:
+        - T = 1635 total observations
+        - n_oos = 500 out-of-sample periods
+        - In-sample = first 1135, out-of-sample = last 500
+ iod (ignored if method="brent").
+    
+    """
+    from msm import msm_filter_from_result, make_msm_states
+ 
+    # Run the Hamilton filter on the full series for each asset
+    filter_1 = msm_filter_from_result(returns_1, msm_1)
+    filter_2 = msm_filter_from_result(returns_2, msm_2)
+ 
+    # predicted_probs shape: (T, n_states) — P(M_t = m_j | I_{t-1})
+    predicted_probs_1 = filter_1["predicted_probs"].to_numpy()
+    predicted_probs_2 = filter_2["predicted_probs"].to_numpy()
+ 
+    # Precompute h(m_j) = sqrt(prod(m_j)) for each state
+    states_1 = make_msm_states(k=msm_1.k, m0=msm_1.params.m0)
+    states_2 = make_msm_states(k=msm_2.k, m0=msm_2.params.m0)
+    h_1 = np.sqrt(np.prod(states_1, axis=1))
+    h_2 = np.sqrt(np.prod(states_2, axis=1))
+ 
+    sigma_1 = msm_1.params.sigma
+    sigma_2 = msm_2.params.sigma
+ 
+    T = predicted_probs_1.shape[0]
+    t_start = T - n_oos
+    var_forecasts = np.zeros(n_oos)
+ 
+    for i in range(n_oos):
+        t   = t_start + i
+        sp1 = predicted_probs_1[t]
+        sp2 = predicted_probs_2[t]
+ 
+        if method == "mc":
+            var_forecasts[i] = portfolio_var_mc(
+                state_probs_1=sp1,
+                state_probs_2=sp2,
+                sigma_1=sigma_1,
+                sigma_2=sigma_2,
+                h_1=h_1,
+                h_2=h_2,
+                copula_params=copula_params,
+                copula=copula,
+                pi=pi,
+                alpha=alpha,
+                n_samples=n_samples,
+                seed=seed + i if seed is not None else None,
+            )
+        elif method == "brent":
+            var_forecasts[i] = portfolio_var_brent(
+                state_probs_1=sp1,
+                state_probs_2=sp2,
+                sigma_1=sigma_1,
+                sigma_2=sigma_2,
+                h_1=h_1,
+                h_2=h_2,
+                copula_params=copula_params,
+                copula=copula,
+                pi=pi,
+                alpha=alpha,
+                seed=seed + i if seed is not None else None,
+            )
+        else:
+            raise ValueError("method must be 'mc' or 'brent'")
+ 
+        if (i + 1) % 50 == 0:
+            print(f"  [{i+1}/{n_oos}] VaR_{int(alpha*100)}% = {var_forecasts[i]:.4f}")
+ 
+    return var_forecasts

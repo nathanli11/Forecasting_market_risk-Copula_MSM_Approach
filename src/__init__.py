@@ -67,6 +67,10 @@ from src.copulas import (
     frank_copula_logpdf,
     plackett_copula_logpdf,
     copula_results_table,
+    portfolio_var_mc,
+    portfolio_var_brent,
+    _sample_student_copula,
+    _msm_quantile,
 )
 from src.plotting import (
     plot_price_evolution,
@@ -91,6 +95,7 @@ from src.risk import (
     summary_statistics,
     var_exceedances,
     violation_rate,
+    forecast_var_oos
 )
 
 __all__ = [
@@ -161,6 +166,10 @@ __all__ = [
     "frank_copula_logpdf",
     "plackett_copula_logpdf",
     "copula_results_table",
+    "portfolio_var_mc",
+    "portfolio_var_brent",
+    "_sample_student_copula",
+    "_msm_quantile",
 
     # plotting
     "plot_price_evolution",
@@ -185,4 +194,5 @@ __all__ = [
     "summary_statistics",
     "var_exceedances",
     "violation_rate",
+    "forecast_var_oos"
 ]
