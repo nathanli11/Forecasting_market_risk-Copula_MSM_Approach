@@ -312,6 +312,9 @@ def _copula_logpdf_from_vector(
 
     if copula == "rotated_clayton":
         return rotated_clayton_copula_logpdf(uniforms, theta=float(x[0]))
+    
+    if copula == "sjc":
+        return sjc_copula_logpdf(uniforms, tau_u=float(x[0]), tau_l=float(x[1]))
 
     if copula == "frank":
         return frank_copula_logpdf(uniforms, theta=float(x[0]))
@@ -321,9 +324,6 @@ def _copula_logpdf_from_vector(
 
     if copula == "rotated_gumbel":
         return rotated_gumbel_copula_logpdf(uniforms, theta=float(x[0]))
-
-    if copula == "sjc":
-        return sjc_copula_logpdf(uniforms, tau_u=float(x[0]), tau_l=float(x[1]))
 
     raise ValueError(f"Unknown copula: {copula}")
 
@@ -424,15 +424,15 @@ def _params_dict(copula: str, x: np.ndarray) -> dict[str, float]:
 
     if copula in {"clayton", "rotated_clayton"}:
         return {"theta": float(x[0])}
+    
+    if copula == "sjc":
+        return {"tau_u": float(x[0]), "tau_l": float(x[1])}
 
     if copula == "frank":
         return {"theta": float(x[0])}
 
     if copula in {"gumbel", "rotated_gumbel"}:
         return {"theta": float(x[0])}
-
-    if copula == "sjc":
-        return {"tau_u": float(x[0]), "tau_l": float(x[1])}
 
     raise ValueError(f"Unknown copula: {copula}")
 
@@ -527,10 +527,10 @@ def fit_copula_grid(
         "plackett",
         "clayton",
         "rotated_clayton",
+        "sjc",
         "frank",
         "gumbel",
         "rotated_gumbel",
-        "sjc",
     ),
 ) -> list[CopulaFitResult]:
     """Estimate copulas for several margin models, e.g. MSM and GARCH."""
@@ -583,7 +583,7 @@ def format_copula_table_4(table: pd.DataFrame) -> pd.DataFrame:
     for _, row in table.iterrows():
         params = []
 
-        for name in ["rho", "nu", "theta"]:
+        for name in ["rho", "nu", "theta", "tau_u", "tau_l"]:
             if name in row and pd.notna(row[name]):
                 params.append(f"{name}={row[name]:.3f}")
 
