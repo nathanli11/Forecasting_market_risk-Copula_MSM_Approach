@@ -1,0 +1,23 @@
+name: copula-msm-var
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy>=1.26
+  - pandas>=2.1
+  - scipy>=1.11
+  - statsmodels>=0.14
+  - plotly>=5.20
+  - pandas-datareader>=0.10
+  - yfinance>=0.2.40
+  - python-dotenv>=1.0
+  - black>=24.0
+  - ipykernel>=6.29
+  - jupyterlab>=4.0
+  - pytest>=8.0
+  - ruff>=0.4
+  - pip
+  - pip:
+      - arch>=7.0
+      - kaleido>=0.2.1
+      - -e .
