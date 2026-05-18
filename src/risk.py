@@ -165,7 +165,7 @@ def format_table_1(stats_table: pd.DataFrame) -> pd.DataFrame:
     for column in test_columns:
         pvalue_column = f"{column} p-value"
         formatted[column] = [
-            f"{stat:.3f}\n({pvalue:.3f})"
+            f"{stat:.3f} ({pvalue:.3f})"
             for stat, pvalue in zip(
                 stats_table[column],
                 stats_table[pvalue_column],

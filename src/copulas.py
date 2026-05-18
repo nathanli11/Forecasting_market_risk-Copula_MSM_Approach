@@ -220,6 +220,72 @@ def plackett_copula_logpdf(uniforms: pd.DataFrame, theta: float) -> np.ndarray:
     return np.log(density)
 
 
+def _jc_logpdf(
+    u: np.ndarray,
+    v: np.ndarray,
+    tau_u: float,
+    tau_l: float,
+) -> np.ndarray:
+    """Log-density of the Joe-Clayton (BB7) copula.
+
+    Patton (2006), Appendix A.
+    kappa = 1 / log2(2 - tau_u), gamma = -1 / log2(tau_l).
+    """
+    kappa = 1.0 / np.log2(2.0 - tau_u)
+    gamma = -1.0 / np.log2(tau_l)
+
+    a = np.clip(1.0 - (1.0 - u) ** kappa, EPS, 1.0 - EPS)
+    b = np.clip(1.0 - (1.0 - v) ** kappa, EPS, 1.0 - EPS)
+
+    s = a ** (-gamma) + b ** (-gamma) - 1.0
+    s = np.maximum(s, 1.0 + EPS)
+
+    s_neg_q = s ** (-1.0 / gamma)
+    one_minus = np.clip(1.0 - s_neg_q, EPS, 1.0)
+
+    bracket = (gamma + 1.0) / gamma - (kappa * gamma + 1.0) / (kappa * gamma) * s_neg_q
+
+    log_density = (
+        np.log(kappa)
+        + np.log(gamma)
+        + (1.0 / kappa - 2.0) * np.log(one_minus)
+        + (-1.0 / gamma - 2.0) * np.log(s)
+        + np.log(np.maximum(bracket, EPS))
+        + (-gamma - 1.0) * (np.log(a) + np.log(b))
+        + (kappa - 1.0) * (np.log1p(-(u)) + np.log1p(-(v)))
+    )
+
+    return log_density
+
+
+def sjc_copula_logpdf(
+    uniforms: pd.DataFrame,
+    tau_u: float,
+    tau_l: float,
+) -> np.ndarray:
+    """Symmetrized Joe-Clayton copula log-density (Patton 2006).
+
+    tau_u: upper tail dependence in (0, 1).
+    tau_l: lower tail dependence in (0, 1).
+    c_SJC = 0.5 * (c_JC(u,v; tau_u, tau_l) + c_JC(1-u, 1-v; tau_l, tau_u))
+    """
+    frame = _validate_uniforms(uniforms)
+
+    if not (0.0 < tau_u < 1.0) or not (0.0 < tau_l < 1.0):
+        return np.full(len(frame), -np.inf)
+
+    u = frame.iloc[:, 0].to_numpy(dtype=float)
+    v = frame.iloc[:, 1].to_numpy(dtype=float)
+
+    log_c1 = _jc_logpdf(u, v, tau_u, tau_l)
+    log_c2 = _jc_logpdf(1.0 - u, 1.0 - v, tau_l, tau_u)
+
+    log_max = np.maximum(log_c1, log_c2)
+    log_sum = log_max + np.log(np.exp(log_c1 - log_max) + np.exp(log_c2 - log_max))
+
+    return np.log(0.5) + log_sum
+
+
 def _copula_logpdf_from_vector(
     copula: str,
     uniforms: pd.DataFrame,
@@ -246,6 +312,9 @@ def _copula_logpdf_from_vector(
 
     if copula == "rotated_clayton":
         return rotated_clayton_copula_logpdf(uniforms, theta=float(x[0]))
+    
+    if copula == "sjc":
+        return sjc_copula_logpdf(uniforms, tau_u=float(x[0]), tau_l=float(x[1]))
 
     if copula == "frank":
         return frank_copula_logpdf(uniforms, theta=float(x[0]))
@@ -328,6 +397,16 @@ def _initial_points_and_bounds(
             np.array([10.0]),
         ], [(1.0001, 50.0)]
 
+    if copula == "sjc":
+        bounds = [(1e-4, 0.9999), (1e-4, 0.9999)]
+        return [
+            np.array([0.10, 0.10]),
+            np.array([0.20, 0.20]),
+            np.array([0.30, 0.10]),
+            np.array([0.10, 0.30]),
+            np.array([0.30, 0.30]),
+        ], bounds
+
     raise ValueError(f"Unknown copula: {copula}")
 
 
@@ -345,6 +424,9 @@ def _params_dict(copula: str, x: np.ndarray) -> dict[str, float]:
 
     if copula in {"clayton", "rotated_clayton"}:
         return {"theta": float(x[0])}
+    
+    if copula == "sjc":
+        return {"tau_u": float(x[0]), "tau_l": float(x[1])}
 
     if copula == "frank":
         return {"theta": float(x[0])}
@@ -420,6 +502,7 @@ def fit_all_copulas(
         "frank",
         "gumbel",
         "rotated_gumbel",
+        "sjc",
     ),
 ) -> list[CopulaFitResult]:
     """Estimate several copulas on the same PIT data."""
@@ -444,6 +527,7 @@ def fit_copula_grid(
         "plackett",
         "clayton",
         "rotated_clayton",
+        "sjc",
         "frank",
         "gumbel",
         "rotated_gumbel",
@@ -499,7 +583,7 @@ def format_copula_table_4(table: pd.DataFrame) -> pd.DataFrame:
     for _, row in table.iterrows():
         params = []
 
-        for name in ["rho", "nu", "theta"]:
+        for name in ["rho", "nu", "theta", "tau_u", "tau_l"]:
             if name in row and pd.notna(row[name]):
                 params.append(f"{name}={row[name]:.3f}")
 

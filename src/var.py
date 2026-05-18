@@ -114,6 +114,139 @@ def forecast_msm_copula_var_oos_fixed_params(
     )
 
 
+def forecast_msm_copula_var_oos_rolling(
+    returns_1: pd.Series,
+    returns_2: pd.Series,
+    k_1: int,
+    k_2: int,
+    copula: str = "student",
+    pi: float = 0.5,
+    alpha: float = 0.05,
+    n_insample: int = 1135,
+    n_oos: int = 500,
+    n_starts: int = 5,
+    seed: int = 123,
+    integration_nodes: int = 501,
+    root_tol: float = 1e-4,
+    verbose: bool = True,
+) -> pd.Series:
+    """True rolling VaR forecasts: MSM and copula re-estimated at each step.
+
+    At each out-of-sample date t, re-estimates MSM (both assets) and the
+    copula on the rolling window [t - n_insample, t - 1], then computes the
+    one-step-ahead VaR.  This matches the rolling scheme described in the
+    paper (Segnon & Trede, 2023, Section 4).
+
+    Warning: this calls fit_msm twice and fit_copula once per step.
+    With n_oos=500 this runs ~1000 MSM optimisations -- expect long runtime.
+    Reduce n_starts to trade accuracy for speed.
+    """
+    try:
+        from src.msm import (
+            fit_msm,
+            make_msm_states,
+            msm_filter_from_result,
+            renewal_probabilities_from_gamma_k,
+            transition_matrix_from_gammas,
+        )
+        from src.copulas import fit_copula
+    except ImportError:
+        from msm import (
+            fit_msm,
+            make_msm_states,
+            msm_filter_from_result,
+            renewal_probabilities_from_gamma_k,
+            transition_matrix_from_gammas,
+        )
+        from copulas import fit_copula
+
+    _validate_var_inputs(alpha=alpha, pi=pi)
+
+    if n_oos <= 0:
+        raise ValueError("n_oos must be positive.")
+    if n_insample <= 0:
+        raise ValueError("n_insample must be positive.")
+
+    series_1 = pd.to_numeric(returns_1, errors="coerce").dropna()
+    series_2 = pd.to_numeric(returns_2, errors="coerce").dropna()
+
+    common_index = series_1.index.intersection(series_2.index)
+    series_1 = series_1.loc[common_index]
+    series_2 = series_2.loc[common_index]
+
+    required = n_insample + n_oos
+    if len(common_index) < required:
+        raise ValueError(
+            f"Need at least n_insample + n_oos = {required} observations, "
+            f"got {len(common_index)}."
+        )
+
+    t_start = len(common_index) - n_oos
+    forecast_index = common_index[t_start:]
+    var_values = np.empty(n_oos, dtype=float)
+
+    for i in range(n_oos):
+        window_1 = series_1.iloc[i : t_start + i]
+        window_2 = series_2.iloc[i : t_start + i]
+
+        msm_1_i = fit_msm(window_1, k=k_1, n_starts=n_starts, seed=seed + i, verbose=False)
+        msm_2_i = fit_msm(window_2, k=k_2, n_starts=n_starts, seed=seed + i, verbose=False)
+
+        filter_1_i = msm_filter_from_result(window_1, msm_1_i)
+        filter_2_i = msm_filter_from_result(window_2, msm_2_i)
+
+        # One-step-ahead state probabilities for the forecast date:
+        # P(s_t | r_{i}, ..., r_{t-1}) = filtered_probs[-1] @ A
+        gammas_1 = renewal_probabilities_from_gamma_k(k=k_1, b=msm_1_i.params.b, gamma_k=msm_1_i.params.gamma_k)
+        gammas_2 = renewal_probabilities_from_gamma_k(k=k_2, b=msm_2_i.params.b, gamma_k=msm_2_i.params.gamma_k)
+        A_1 = transition_matrix_from_gammas(gammas_1)
+        A_2 = transition_matrix_from_gammas(gammas_2)
+
+        pred_probs_1 = filter_1_i["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_1
+        pred_probs_2 = filter_2_i["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_2
+
+        # Fit copula on rolling-window PIT values
+        pit_1 = filter_1_i["pit"].to_numpy(dtype=float)
+        pit_2 = filter_2_i["pit"].to_numpy(dtype=float)
+        uniforms_i = pd.DataFrame({"asset_1": pit_1, "asset_2": pit_2})
+        copula_result_i = fit_copula(uniforms_i, copula=copula, margin_model="msm")
+        copula_params_i = copula_result_i.params
+
+        states_1 = make_msm_states(k=k_1, m0=msm_1_i.params.m0)
+        states_2 = make_msm_states(k=k_2, m0=msm_2_i.params.m0)
+        h_1 = np.sqrt(np.prod(states_1, axis=1))
+        h_2 = np.sqrt(np.prod(states_2, axis=1))
+
+        var_values[i] = portfolio_var_root(
+            state_probs_1=pred_probs_1,
+            state_probs_2=pred_probs_2,
+            sigma_1=msm_1_i.params.sigma,
+            sigma_2=msm_2_i.params.sigma,
+            h_1=h_1,
+            h_2=h_2,
+            copula_params=copula_params_i,
+            mean_1=msm_1_i.mean_return,
+            mean_2=msm_2_i.mean_return,
+            copula=copula,
+            pi=pi,
+            alpha=alpha,
+            integration_nodes=integration_nodes,
+            root_tol=root_tol,
+        )
+
+        if verbose and (i + 1) % 10 == 0:
+            print(
+                f"  [{i + 1}/{n_oos}] "
+                f"VaR {100 * alpha:.1f}% = {var_values[i]:.4f}"
+            )
+
+    return pd.Series(
+        var_values,
+        index=forecast_index,
+        name=f"VaR_{int(alpha * 100)}_return",
+    )
+
+
 def portfolio_var_root(
     state_probs_1: np.ndarray,
     state_probs_2: np.ndarray,
