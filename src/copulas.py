@@ -158,7 +158,7 @@ def rotated_gumbel_copula_logpdf(
 
 
 def frank_copula_logpdf(uniforms: pd.DataFrame, theta: float) -> np.ndarray:
-    """Frank copula log-density."""
+    """Frank copula log-density with numerical safeguards."""
     frame = _validate_uniforms(uniforms)
 
     if abs(theta) < 1e-6:
@@ -167,18 +167,19 @@ def frank_copula_logpdf(uniforms: pd.DataFrame, theta: float) -> np.ndarray:
     u = frame.iloc[:, 0].to_numpy(dtype=float)
     v = frame.iloc[:, 1].to_numpy(dtype=float)
 
-    numerator = (
-        theta
-        * (1.0 - np.exp(-theta))
-        * np.exp(-theta * (u + v))
-    )
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        numerator = (
+            theta
+            * (1.0 - np.exp(-theta))
+            * np.exp(-theta * (u + v))
+        )
 
-    denominator = (
-        (1.0 - np.exp(-theta))
-        - (1.0 - np.exp(-theta * u)) * (1.0 - np.exp(-theta * v))
-    ) ** 2
+        denominator = (
+            (1.0 - np.exp(-theta))
+            - (1.0 - np.exp(-theta * u)) * (1.0 - np.exp(-theta * v))
+        ) ** 2
 
-    density = numerator / denominator
+        density = numerator / denominator
 
     if np.any(~np.isfinite(density)) or np.any(density <= 0):
         return np.full(len(frame), -np.inf)

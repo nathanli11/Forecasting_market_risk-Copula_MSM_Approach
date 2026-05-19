@@ -196,7 +196,7 @@ def standardize_returns(returns: pd.Series) -> pd.Series:
 
 
 def historical_var(returns: pd.Series | np.ndarray, alpha: float = 0.01) -> float:
-    """Historical VaR as a positive loss number at tail probability alpha."""
+    """Historical VaR as a loss number at tail probability alpha."""
     _validate_alpha(alpha)
     values = _clean_returns(returns)
     return float(np.quantile(values, alpha))
@@ -208,7 +208,7 @@ def gaussian_var(
     mean: float | None = None,
     volatility: float | None = None,
 ) -> float:
-    """Parametric Gaussian VaR as a positive loss number."""
+    """Parametric Gaussian VaR as a loss number."""
     _validate_alpha(alpha)
     values = _clean_returns(returns)
     mu = float(values.mean()) if mean is None else float(mean)
