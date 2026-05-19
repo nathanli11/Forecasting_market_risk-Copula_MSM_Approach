@@ -59,13 +59,14 @@ def summary_statistics(
 
 
 def arch_lm_test(series: pd.Series, lags: int) -> tuple[float, float]:
-    """Return Engle ARCH LM statistic and p-value."""
+    """Return Engle ARCH LM statistic and p-value on centered returns."""
     clean = pd.to_numeric(series, errors="coerce").dropna()
 
     if clean.empty:
         raise ValueError("ARCH test requires at least one observation.")
 
-    lm_stat, lm_pvalue, _, _ = het_arch(clean, nlags=lags)
+    residuals = clean - clean.mean()
+    lm_stat, lm_pvalue, _, _ = het_arch(residuals, nlags=lags)
 
     return float(lm_stat), float(lm_pvalue)
 
@@ -106,35 +107,61 @@ def hill_tail_index(
 
 def hurst_exponent(
     series: pd.Series,
-    min_lag: int = 2,
-    max_lag: int = 100,
+    min_window: int = 5,
+    max_window: int | None = None,
+    n_windows: int = 25,
+    order: int = 1,
 ) -> float:
-    """Estimate the Hurst exponent using the log-log variance method."""
+    """Estimate Hurst exponent with detrended fluctuation analysis (DFA)."""
     values = pd.to_numeric(series, errors="coerce").dropna().to_numpy(dtype=float)
 
-    if values.size < 20:
+    if values.size < 50:
         return float("nan")
 
-    max_lag = min(max_lag, values.size // 4)
+    n = values.size
+    if max_window is None:
+        max_window = n // 4
 
-    if max_lag <= min_lag:
-        return float("nan")
+    profile = np.cumsum(values - values.mean())
 
-    lags = np.arange(min_lag, max_lag + 1)
-    tau = []
+    windows = np.unique(
+        np.floor(
+            np.logspace(
+                np.log10(min_window),
+                np.log10(max_window),
+                n_windows,
+            )
+        ).astype(int)
+    )
 
-    for lag in lags:
-        diff = values[lag:] - values[:-lag]
-        tau.append(np.sqrt(np.std(diff, ddof=1)))
+    fluct = []
+    valid_windows = []
 
-    tau = np.asarray(tau, dtype=float)
-    valid = np.isfinite(tau) & (tau > 0)
+    for window in windows:
+        n_segments = n // window
+        if n_segments < 2:
+            continue
+
+        segment_fluct = []
+
+        for i in range(n_segments):
+            segment = profile[i * window : (i + 1) * window]
+            t = np.arange(window)
+            trend = np.polyval(np.polyfit(t, segment, order), t)
+            segment_fluct.append(np.sqrt(np.mean((segment - trend) ** 2)))
+
+        fluct.append(np.sqrt(np.mean(np.asarray(segment_fluct) ** 2)))
+        valid_windows.append(window)
+
+    fluct = np.asarray(fluct)
+    valid_windows = np.asarray(valid_windows)
+
+    valid = np.isfinite(fluct) & (fluct > 0)
 
     if valid.sum() < 2:
         return float("nan")
 
-    slope, _ = np.polyfit(np.log(lags[valid]), np.log(tau[valid]), 1)
-
+    slope, _ = np.polyfit(np.log(valid_windows[valid]), np.log(fluct[valid]), 1)
     return float(slope)
 
 
