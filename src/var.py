@@ -827,12 +827,6 @@ def forecast_riskmetrics_var(
     n_oos: int = 500,
     include_mean: bool = False,
 ) -> pd.Series:
-    """RiskMetrics EWMA VaR as a signed return quantile."""
-    _validate_var_inputs(alpha=alpha, pi=0.5)
-
-    if not 0.0 < lambda_ < 1.0:
-        raise ValueError("lambda_ must be in (0, 1).")
-
     frame = returns.apply(pd.to_numeric, errors="coerce").dropna(how="any")
 
     if weights is None:
@@ -843,38 +837,32 @@ def forecast_riskmetrics_var(
     if not np.isclose(weights.sum(), 1.0):
         raise ValueError("weights must sum to 1.")
 
-    if window_size + n_oos > len(frame):
+    portfolio = frame @ weights
+
+    if window_size + n_oos > len(portfolio):
         raise ValueError("window_size + n_oos cannot exceed sample size.")
 
     z_alpha = norm.ppf(alpha)
+    start = len(portfolio) - n_oos
+    dates = portfolio.index[start:]
 
-    start = len(frame) - n_oos
-    dates = frame.index[start:]
-
-    initial_window = frame.iloc[start - window_size:start]
-    sigma = initial_window.cov().to_numpy(dtype=float)
+    initial_window = portfolio.iloc[start - window_size:start]
+    sigma2 = float(initial_window.var(ddof=1))
 
     values = []
 
-    for pos in range(start, len(frame)):
-        previous_return = frame.iloc[pos - 1].to_numpy(dtype=float).reshape(-1, 1)
+    for pos in range(start, len(portfolio)):
+        r_lag = float(portfolio.iloc[pos - 1])
 
-        sigma = (
-            lambda_ * sigma
-            + (1.0 - lambda_) * (previous_return @ previous_return.T)
-        )
+        sigma2 = (1.0 - lambda_) * r_lag**2 + lambda_ * sigma2
 
         mu = (
-            frame.iloc[pos - window_size:pos].mean().to_numpy(dtype=float)
+            float(portfolio.iloc[pos - window_size:pos].mean())
             if include_mean
-            else np.zeros(frame.shape[1])
+            else 0.0
         )
 
-        portfolio_mean = float(weights @ mu)
-        portfolio_var = float(weights @ sigma @ weights)
-        portfolio_vol = np.sqrt(max(portfolio_var, 0.0))
-
-        values.append(portfolio_mean + portfolio_vol * z_alpha)
+        values.append(mu + np.sqrt(max(sigma2, 0.0)) * z_alpha)
 
     return pd.Series(
         values,
