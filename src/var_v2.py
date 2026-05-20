@@ -272,16 +272,56 @@ def copula_cdf(u: np.ndarray, v: np.ndarray, copula_params: dict[str, float], co
     raise ValueError(f"Unsupported copula: {copula}")
 
 
-def _joe_clayton_cdf(u: np.ndarray, v: np.ndarray, tau_u: float, tau_l: float) -> np.ndarray:
-    """Joe-Clayton / BB7 CDF parameterized by upper and lower tail dependence."""
-    if not (0.0 < tau_u < 1.0 and 0.0 < tau_l < 1.0):
+def _joe_clayton_cdf(
+    u: np.ndarray,
+    v: np.ndarray,
+    tau_u: float,
+    tau_l: float,
+) -> np.ndarray:
+    """Stable Joe-Clayton / BB7 CDF parameterized by tail dependence."""
+    u = np.clip(np.asarray(u, dtype=float), EPS, 1.0 - EPS)
+    v = np.clip(np.asarray(v, dtype=float), EPS, 1.0 - EPS)
+
+    if not (0.0 < tau_u < 1.0) or not (0.0 < tau_l < 1.0):
         raise ValueError("SJC tau_u and tau_l must be in (0, 1).")
+
     kappa = 1.0 / np.log2(2.0 - tau_u)
     gamma = -1.0 / np.log2(tau_l)
-    a = 1.0 - (1.0 - u) ** kappa
-    b = 1.0 - (1.0 - v) ** kappa
-    s = np.maximum(a ** (-gamma) + b ** (-gamma) - 1.0, 1.0 + EPS)
-    return 1.0 - (1.0 - s ** (-1.0 / gamma)) ** (1.0 / kappa)
+
+    log_1_minus_u = np.log1p(-u)
+    log_1_minus_v = np.log1p(-v)
+
+    a = -np.expm1(kappa * log_1_minus_u)
+    b = -np.expm1(kappa * log_1_minus_v)
+
+    a = np.clip(a, EPS, 1.0 - EPS)
+    b = np.clip(b, EPS, 1.0 - EPS)
+
+    log_a = np.log(a)
+    log_b = np.log(b)
+
+    x = -gamma * log_a
+    y = -gamma * log_b
+
+    m = np.maximum(x, y)
+
+    log_s = m + np.log(
+        np.exp(x - m) + np.exp(y - m) - np.exp(-m)
+    )
+
+    log_s = np.maximum(log_s, np.log(1.0 + EPS))
+
+    s_neg_q = np.exp(-log_s / gamma)
+    s_neg_q = np.clip(s_neg_q, EPS, 1.0 - EPS)
+
+    inner = 1.0 - s_neg_q
+    inner = np.clip(inner, EPS, 1.0 - EPS)
+
+    # C = 1 - inner^(1/kappa), computed stably
+    log_inner = np.log(inner)
+    cdf = -np.expm1((1.0 / kappa) * log_inner)
+
+    return np.clip(cdf, EPS, 1.0 - EPS)
 
 
 def copula_conditional_cdf_u1_given_u2(
