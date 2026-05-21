@@ -439,6 +439,7 @@ def fit_msm(
     n_starts: int = 20,
     seed: int = 123,
     verbose: bool = True,
+    initial_points_extra=None,
 ) -> MSMFitResult:
     """Estimate MSM parameters for one return series and one k."""
     series = pd.to_numeric(returns, errors="coerce").dropna()
@@ -456,13 +457,18 @@ def fit_msm(
         (1.0001, 50.0), # b
         (1e-5, 0.999),  # gamma_k
     ]
-    initial_points = _initial_points_for_msm(
-        y=y,
-        k=k,
-        n_starts=n_starts,
-        rng=rng,
+    initial_points = []
+    if initial_points_extra is not None:
+        initial_points.extend(initial_points_extra)
+    initial_points.extend(
+        _initial_points_for_msm(
+            y=y,
+            k=k,
+            n_starts=n_starts,
+            rng=rng,
+        )
     )
-
+    initial_points = initial_points[:n_starts]
     y_array = y.to_numpy(dtype=float)
     for start_id, x0 in enumerate(initial_points, start=1):
         if verbose:

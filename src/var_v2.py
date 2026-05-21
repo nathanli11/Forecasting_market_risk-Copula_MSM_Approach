@@ -521,7 +521,18 @@ def forecast_msm_copula_var_rolling(
     root_tol: float = 1e-4,
     verbose: bool = True,
 ) -> pd.Series:
-    """Rolling one-step-ahead Copula-MSM VaR. Paper default uses k=5."""
+    """Rolling one-step-ahead Copula-MSM VaR with MSM warm-start.
+
+    Paper-like structure:
+        - fixed rolling window;
+        - MSM re-estimated at each date;
+        - copula re-estimated at each date;
+        - one-step-ahead portfolio VaR solved numerically.
+
+    Warm-start only changes the numerical initialization of the MSM optimizer.
+    It does not change the likelihood, model, rolling window, copula estimation,
+    or VaR equation.
+    """
     try:
         from src.msm import (
             fit_msm,
@@ -543,38 +554,140 @@ def forecast_msm_copula_var_rolling(
 
     w = validate_alpha_weights(alpha, weights)
     pi = float(w[0])
-    frame = prepare_bivariate_returns(returns, n_insample, n_oos)
+
+    frame = prepare_bivariate_returns(
+        returns,
+        n_insample=n_insample,
+        n_oos=n_oos,
+    )
+
     assets = list(frame.columns)
-    values, dates = [], []
+    values: list[float] = []
+    dates: list[pd.Timestamp] = []
+
+    # Warm-start containers.
+    # prev_xj = [m0, sigma, b, gamma_k] from previous rolling window.
+    prev_x1 = None
+    prev_x2 = None
 
     for i, date, window in rolling_windows(frame, n_insample, n_oos):
-        r1, r2 = window[assets[0]], window[assets[1]]
-        msm_1 = fit_msm(r1, k=k, n_starts=n_starts, seed=seed + 10000 * i + 1, verbose=False)
-        msm_2 = fit_msm(r2, k=k, n_starts=n_starts, seed=seed + 10000 * i + 2, verbose=False)
+        r1 = window[assets[0]]
+        r2 = window[assets[1]]
+
+        initial_extra_1 = [prev_x1] if prev_x1 is not None else None
+        initial_extra_2 = [prev_x2] if prev_x2 is not None else None
+
+        msm_1 = fit_msm(
+            returns=r1,
+            k=k,
+            n_starts=n_starts,
+            seed=seed + 10000 * i + 1,
+            verbose=False,
+            initial_points_extra=initial_extra_1,
+        )
+
+        msm_2 = fit_msm(
+            returns=r2,
+            k=k,
+            n_starts=n_starts,
+            seed=seed + 10000 * i + 2,
+            verbose=False,
+            initial_points_extra=initial_extra_2,
+        )
+
+        # Update warm-starts for next rolling window.
+        prev_x1 = np.array(
+            [
+                msm_1.params.m0,
+                msm_1.params.sigma,
+                msm_1.params.b,
+                msm_1.params.gamma_k,
+            ],
+            dtype=float,
+        )
+
+        prev_x2 = np.array(
+            [
+                msm_2.params.m0,
+                msm_2.params.sigma,
+                msm_2.params.b,
+                msm_2.params.gamma_k,
+            ],
+            dtype=float,
+        )
 
         filt_1 = msm_filter_from_result(r1, msm_1)
         filt_2 = msm_filter_from_result(r2, msm_2)
-        pit = pd.concat([filt_1["pit"].rename(assets[0]), filt_2["pit"].rename(assets[1])], axis=1).dropna()
-        cop_fit = fit_copula(pit, copula=copula, margin_model="MSM")
 
-        gammas_1 = renewal_probabilities_from_gamma_k(k=k, b=msm_1.params.b, gamma_k=msm_1.params.gamma_k)
-        gammas_2 = renewal_probabilities_from_gamma_k(k=k, b=msm_2.params.b, gamma_k=msm_2.params.gamma_k)
+        pit = pd.concat(
+            [
+                filt_1["pit"].rename(assets[0]),
+                filt_2["pit"].rename(assets[1]),
+            ],
+            axis=1,
+        ).dropna()
+
+        cop_fit = fit_copula(
+            pit,
+            copula=copula,
+            margin_model="MSM",
+        )
+
+        gammas_1 = renewal_probabilities_from_gamma_k(
+            k=k,
+            b=msm_1.params.b,
+            gamma_k=msm_1.params.gamma_k,
+        )
+
+        gammas_2 = renewal_probabilities_from_gamma_k(
+            k=k,
+            b=msm_2.params.b,
+            gamma_k=msm_2.params.gamma_k,
+        )
+
         A_1 = transition_matrix_from_gammas(gammas_1)
         A_2 = transition_matrix_from_gammas(gammas_2)
+
+        # One-step-ahead predictive state probabilities:
+        # P(S_t | Omega_{t-1}) = P(S_{t-1} | Omega_{t-1}) A
         p1 = filt_1["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_1
         p2 = filt_2["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_2
 
-        h1 = np.sqrt(np.prod(make_msm_states(k=k, m0=msm_1.params.m0), axis=1))
-        h2 = np.sqrt(np.prod(make_msm_states(k=k, m0=msm_2.params.m0), axis=1))
+        states_1 = make_msm_states(k=k, m0=msm_1.params.m0)
+        states_2 = make_msm_states(k=k, m0=msm_2.params.m0)
+
+        h1 = np.sqrt(np.prod(states_1, axis=1))
+        h2 = np.sqrt(np.prod(states_2, axis=1))
 
         def inv1(u):
-            return msm_1.mean_return + msm_conditional_quantile(u, p1, msm_1.params.sigma, h1)
+            return (
+                msm_1.mean_return
+                + msm_conditional_quantile(
+                    u,
+                    p1,
+                    msm_1.params.sigma,
+                    h1,
+                )
+            )
 
         def inv2(u):
-            return msm_2.mean_return + msm_conditional_quantile(u, p2, msm_2.params.sigma, h2)
+            return (
+                msm_2.mean_return
+                + msm_conditional_quantile(
+                    u,
+                    p2,
+                    msm_2.params.sigma,
+                    h2,
+                )
+            )
 
         def cdf1(x):
-            return msm_conditional_cdf(np.asarray(x) - msm_1.mean_return, p1, msm_1.params.sigma, h1)
+            return msm_conditional_cdf(
+                np.asarray(x) - msm_1.mean_return,
+                p1,
+                msm_1.params.sigma,
+                h1,
+            )
 
         var_t = solve_portfolio_var(
             alpha=alpha,
@@ -587,15 +700,24 @@ def forecast_msm_copula_var_rolling(
             integration_nodes=integration_nodes,
             root_tol=root_tol,
         )
+
         values.append(var_t)
         dates.append(date)
 
         if verbose and (i + 1) % 10 == 0:
-            print(f"MSM-{copula} alpha={alpha:g}: {i + 1}/{n_oos}, VaR={var_t:.4f}")
+            print(
+                f"MSM-{copula} alpha={alpha:g}: "
+                f"{i + 1}/{n_oos}, "
+                f"VaR={var_t:.4f}, "
+                f"x1={prev_x1.round(4)}, "
+                f"x2={prev_x2.round(4)}"
+            )
 
-    return pd.Series(values, index=dates, name=f"CopulaMSM_{copula}_VaR_{alpha:g}")
-
-
+    return pd.Series(
+        values,
+        index=dates,
+        name=f"CopulaMSM_{copula}_VaR_{alpha:g}",
+    )
 # -----------------------------------------------------------------------------
 # Rolling GARCH, Copula-GARCH, CCC-GARCH
 # -----------------------------------------------------------------------------
