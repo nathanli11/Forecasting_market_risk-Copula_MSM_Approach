@@ -1,0 +1,16 @@
+\begin{table}
+\caption{The results of LR test using VaR(5%) forecasts.}
+\label{tab:lr_var_5}
+\begin{tabular}{llllllllllllllll}
+\toprule
+ & \multicolumn{4}{c}{Bench} & \multicolumn{9}{c}{Copula-GARCH} & \multicolumn{2}{c}{Copula-MSM} \\
+ & Historical & RiskMetrics & Var-Covar & CCC-GARCH & Normal & Student & Plackett & Clayton & rotClayton & SJC & Frank & Gumbel & rotGumbel & Normal & Student \\
+stat &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  \\
+\midrule
+EFV & 0.036 & 0.072 & 0.040 & 0.072 & 0.072 & 0.072 & 0.072 & 0.070 & 0.076 & 0.072 & 0.070 & 0.072 & 0.070 & 0.072 & 0.072 \\
+uc & 0.131 & 0.034 & 0.288 & 0.034 & 0.034 & 0.034 & 0.034 & 0.052 & 0.013 & 0.034 & 0.052 & 0.034 & 0.052 & 0.034 & 0.034 \\
+ind & 0.155 & 0.792 & 0.044 & 0.679 & 0.679 & 0.679 & 0.679 & 0.748 & 0.550 & 0.679 & 0.748 & 0.679 & 0.748 & 0.679 & 0.679 \\
+cc & 0.117 & 0.101 & 0.075 & 0.096 & 0.096 & 0.096 & 0.096 & 0.145 & 0.038 & 0.096 & 0.145 & 0.096 & 0.145 & 0.096 & 0.096 \\
+\bottomrule
+\end{tabular}
+\end{table}
