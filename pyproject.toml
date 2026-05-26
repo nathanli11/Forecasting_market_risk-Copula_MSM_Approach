@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copula_msm_var_replication"
+version = "0.1.0"
+description = "Replication toolkit for copula MSM VaR forecasting experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "scipy>=1.11",
+    "statsmodels>=0.14",
+    "plotly>=5.20",
+    "kaleido>=0.2.1",
+    "arch>=7.0",
+    "pandas-datareader>=0.10",
+    "yfinance>=0.2.40",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.0",
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests", "scripts"]
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = []
