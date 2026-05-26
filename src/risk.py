@@ -439,6 +439,58 @@ def christoffersen_lr_test(
     }
 
 
+# 1. GMM duration-based test
+def violation_durations(hits):
+    idx = np.flatnonzero(np.asarray(hits) == 1)
+    if len(idx) < 1:
+        return np.array([])
+    return np.diff(idx) if len(idx) >= 2 else np.array([])
+
+def meixner_polynomials(d, q, p):
+    d = np.asarray(d, dtype=float)
+    M = np.zeros((len(d), p + 1))
+    M[:, 0] = 1.0
+    M_minus = np.zeros(len(d))
+
+    for j in range(0, p):
+        M[:, j + 1] = (
+            ((1 - q) * (2*j + 1) + q * (j - d + 1))
+            / ((j + 1) * np.sqrt(1 - q))
+            * M[:, j]
+            - (j / (j + 1)) * M_minus
+        )
+        M_minus = M[:, j]
+
+    return M[:, 1:]
+
+def gmm_duration_test(hits, alpha, p=2, kind="cc"):
+    hits = np.asarray(hits, dtype=int)
+    durations = violation_durations(hits)
+
+    if len(durations) == 0:
+        return np.nan
+
+    if kind == "uc":
+        q = alpha
+        df = 1
+        M = meixner_polynomials(durations, q, 1)
+    elif kind == "cc":
+        q = alpha
+        df = p
+        M = meixner_polynomials(durations, q, p)
+    elif kind == "ind":
+        q = hits.mean()
+        df = p - 1
+        M = meixner_polynomials(durations, q, p)[:, 1:]
+    else:
+        raise ValueError("kind must be 'uc', 'cc', or 'ind'")
+
+    stat = len(durations) * np.sum(M.mean(axis=0) ** 2)
+    pvalue = 1 - stats.chi2.cdf(stat, df=df)
+
+    return pvalue
+
+
 def _validate_alpha(alpha: float) -> None:
     if not 0 < alpha < 1:
         raise ValueError("alpha must be between 0 and 1.")
