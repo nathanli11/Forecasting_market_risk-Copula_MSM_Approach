@@ -291,3 +291,45 @@ def plot_var_forecasts(
         save_plotly_figure(fig, output_path)
 
     return fig
+
+
+def csv_to_latex_table(
+    csv_path,
+    output_path=None,
+    caption=None,
+    label=None,
+    index=False,
+    float_format="%.3f",
+    column_format=None,
+    na_rep="--",
+    escape=False,
+    longtable=False,
+):
+    """
+    Convertit un fichier CSV en tableau LaTeX prêt à coller dans un rapport.
+    """
+
+    csv_path = Path(csv_path)
+    df = pd.read_csv(csv_path)
+
+    # Supprime/renomme la colonne d’index exportée par pandas
+    if "Unnamed: 0" in df.columns:
+        df = df.rename(columns={"Unnamed: 0": ""})
+
+    latex = df.to_latex(
+        index=index,
+        caption=caption,
+        label=label,
+        float_format=float_format,
+        column_format=column_format,
+        na_rep=na_rep,
+        escape=escape,
+        longtable=longtable,
+        bold_rows=False,
+    )
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.write_text(latex, encoding="utf-8")
+
+    return latex
