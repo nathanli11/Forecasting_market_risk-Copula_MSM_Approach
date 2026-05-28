@@ -491,6 +491,140 @@ def gmm_duration_test(hits, alpha, p=2, kind="cc"):
     return pvalue
 
 
+def stationary_bootstrap_indices(n, B=5000, p=0.1, seed=123):
+    """
+    Génère des indices bootstrap stationnaires.
+    p = probabilité de commencer un nouveau bloc.
+    Longueur moyenne des blocs = 1 / p.
+    """
+    rng = np.random.default_rng(seed)
+    indices = np.empty((B, n), dtype=int)
+
+    for b in range(B):
+        indices[b, 0] = rng.integers(0, n)
+
+        for t in range(1, n):
+            if rng.random() < p:
+                indices[b, t] = rng.integers(0, n)
+            else:
+                indices[b, t] = (indices[b, t - 1] + 1) % n
+
+    return indices
+
+def newey_west_variance(x, max_lag=None):
+    """
+    Estime Var(sqrt(T) * mean(x_t)).
+    """
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    n = len(x)
+
+    if n < 2:
+        return np.nan
+
+    x = x - x.mean()
+
+    if max_lag is None:
+        max_lag = int(np.floor(4 * (n / 100.0) ** (2 / 9)))
+
+    gamma0 = np.dot(x, x) / n
+    var = gamma0
+
+    for lag in range(1, max_lag + 1):
+        cov = np.dot(x[lag:], x[:-lag]) / n
+        weight = 1.0 - lag / (max_lag + 1.0)
+        var += 2.0 * weight * cov
+
+    return max(var, 1e-12)
+
+def spa_pvalue_for_basis(
+    loss_panel,
+    basis_model,
+    B=5000,
+    block_p=0.1,
+    seed=123,
+    nw_lag=None,
+):
+    """
+    H0 : le modèle basis n'est pas dominé par les autres modèles.
+
+    On construit d_{k,t} = L_basis,t - L_k,t.
+    Si E[d_k] > 0, alors le modèle k a une perte plus faible que le basis.
+
+    Statistique SPA :
+        T = max_k sqrt(T) * mean(d_k) / omega_k
+
+    Bootstrap :
+        stationary bootstrap sur les d_t centrés, avec recentrage de Hansen.
+    """
+    if basis_model not in loss_panel.columns:
+        raise ValueError(f"{basis_model} absent de loss_panel.columns")
+
+    panel = loss_panel.dropna(how="any").copy()
+    competitors = [c for c in panel.columns if c != basis_model]
+
+    if len(competitors) == 0:
+        return np.nan
+
+    # d_t = L_basis - L_competitor
+    d = pd.DataFrame(
+        {
+            comp: panel[basis_model] - panel[comp]
+            for comp in competitors
+        },
+        index=panel.index,
+    ).dropna(how="any")
+
+    n = len(d)
+    if n < 10:
+        return np.nan
+
+    d_values = d.to_numpy(dtype=float)
+    d_bar = d_values.mean(axis=0)
+
+    omega = np.array([
+        np.sqrt(newey_west_variance(d_values[:, j], max_lag=nw_lag))
+        for j in range(d_values.shape[1])
+    ])
+
+    omega = np.maximum(omega, 1e-12)
+
+    # Statistique observée
+    t_obs_vec = np.sqrt(n) * d_bar / omega
+    t_obs = max(0.0, float(np.max(t_obs_vec)))
+
+    # Recentrage SPA de Hansen :
+    # mu_c,k = d_bar,k si sqrt(n)*d_bar,k/omega_k <= -sqrt(2 log log n)
+    #          0 sinon
+    threshold = -np.sqrt(2.0 * np.log(np.log(n)))
+    relevant = t_obs_vec > threshold
+    mu_c = np.where(relevant, 0.0, d_bar)
+
+    # Bootstrap stationnaire
+    boot_idx = stationary_bootstrap_indices(
+        n=n,
+        B=B,
+        p=block_p,
+        seed=seed,
+    )
+
+    d_centered = d_values - d_bar
+    boot_stats = np.empty(B, dtype=float)
+
+    for b in range(B):
+        sample = d_centered[boot_idx[b], :]
+        boot_mean = sample.mean(axis=0)
+
+        # Hansen SPA null : bootstrap centered + mu_c
+        boot_t = np.sqrt(n) * (boot_mean + mu_c) / omega
+        boot_stats[b] = max(0.0, float(np.max(boot_t)))
+
+    pvalue = np.mean(boot_stats >= t_obs)
+
+    return float(pvalue)
+
+
+
 def _validate_alpha(alpha: float) -> None:
     if not 0 < alpha < 1:
         raise ValueError("alpha must be between 0 and 1.")

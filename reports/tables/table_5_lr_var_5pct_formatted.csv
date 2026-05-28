@@ -1,7 +1,7 @@
-﻿,Bench,Bench,Bench,Bench,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-MSM,Copula-MSM
-,Historical,RiskMetrics,Var-Covar,CCC-GARCH,Normal,Student,Plackett,Clayton,rotClayton,SJC,Frank,Gumbel,rotGumbel,Normal,Student
-stat,,,,,,,,,,,,,,,
-EFV,0.036,0.072,0.040,0.072,0.072,0.072,0.072,0.070,0.076,0.072,0.070,0.072,0.070,0.072,0.072
-uc,0.131,0.034,0.288,0.034,0.034,0.034,0.034,0.052,0.013,0.034,0.052,0.034,0.052,0.034,0.034
-ind,0.155,0.792,0.044,0.679,0.679,0.679,0.679,0.748,0.550,0.679,0.748,0.679,0.748,0.679,0.679
-cc,0.117,0.101,0.075,0.096,0.096,0.096,0.096,0.145,0.038,0.096,0.145,0.096,0.145,0.096,0.096
+﻿,Bench,Bench,Bench,Bench,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-GARCH,Copula-MSM,Copula-MSM,Copula-MSM,Copula-MSM
+,Historical,RiskMetrics,Var-Covar,CCC-GARCH,Normal,Student,Plackett,Clayton,rotClayton,SJC,Frank,Gumbel,rotGumbel,Normal,Student,Plackett,Clayton
+stat,,,,,,,,,,,,,,,,,
+EFV,0.036,0.072,0.040,0.072,0.072,0.072,0.072,0.070,0.076,0.072,0.070,0.072,0.070,0.072,0.072,0.072,0.072
+uc,0.131,0.034,0.288,0.034,0.034,0.034,0.034,0.052,0.013,0.034,0.052,0.034,0.052,0.034,0.034,0.034,0.034
+ind,0.155,0.792,0.044,0.679,0.679,0.679,0.679,0.748,0.550,0.679,0.748,0.679,0.748,0.679,0.679,0.679,0.679
+cc,0.117,0.101,0.075,0.096,0.096,0.096,0.096,0.145,0.038,0.096,0.145,0.096,0.145,0.096,0.096,0.096,0.096
