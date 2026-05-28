@@ -718,6 +718,7 @@ def forecast_msm_copula_var_rolling(
         index=dates,
         name=f"CopulaMSM_{copula}_VaR_{alpha:g}",
     )
+
 # -----------------------------------------------------------------------------
 # Rolling GARCH, Copula-GARCH, CCC-GARCH
 # -----------------------------------------------------------------------------
@@ -924,3 +925,60 @@ def forecast_all_var_models(
             )
 
     return pd.concat(results, axis=1)
+
+
+# ============================================================
+# VaR Loss
+# ============================================================
+
+def var_loss_series(r, var, alpha):
+    """
+    VaRl_t(alpha) = (alpha - I_t) * (r_t - VaR_t)
+    avec I_t = 1(r_t < VaR_t).
+    Plus la perte moyenne est faible, meilleur est le modèle.
+    """
+    aligned = pd.concat([r, var], axis=1).dropna()
+    rt = aligned.iloc[:, 0]
+    vt = aligned.iloc[:, 1]
+    hit = (rt < vt).astype(float)
+    loss = (alpha - hit) * (rt - vt)
+    return loss
+
+
+def smooth_var_loss_series(r, var, alpha, nu=25.0):
+    """
+    SVaRl_t(alpha) = [alpha - h_nu(r_t, VaR_t)] * (r_t - VaR_t)
+    h_nu(a,b) = [1 + exp(nu(a-b))]^{-1}
+    """
+    aligned = pd.concat([r, var], axis=1).dropna()
+    rt = aligned.iloc[:, 0]
+    vt = aligned.iloc[:, 1]
+
+    x = np.clip(nu * (rt - vt), -700, 700)
+    h = 1.0 / (1.0 + np.exp(x))
+
+    loss = (alpha - h) * (rt - vt)
+    return loss
+
+
+def build_loss_panel(portfolio_returns, var_panel, alpha, smooth=False, nu=25.0):
+    losses = {}
+
+    for model in var_panel.columns:
+        if smooth:
+            losses[model] = smooth_var_loss_series(
+                portfolio_returns,
+                var_panel[model],
+                alpha=alpha,
+                nu=nu,
+            )
+        else:
+            losses[model] = var_loss_series(
+                portfolio_returns,
+                var_panel[model],
+                alpha=alpha,
+            )
+
+    return pd.concat(losses, axis=1).dropna(how="any")
+
+

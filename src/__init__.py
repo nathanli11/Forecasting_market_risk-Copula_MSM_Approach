@@ -103,6 +103,7 @@ from src.var_v2 import (
     portfolio_returns as var_v2_portfolio_returns,
     var_exceedances as var_v2_var_exceedances,
     msm_conditional_cdf as var_v2_msm_conditional_cdf,
+    build_loss_panel,
 )
 from src.plotting import (
     plot_price_evolution,
@@ -126,6 +127,7 @@ from src.risk import (
     summary_statistics,
     var_exceedances,
     violation_rate,
+    spa_pvalue_for_basis,
 )
 
 __all__ = [
@@ -232,6 +234,7 @@ __all__ = [
     "var_v2_portfolio_returns",
     "var_v2_var_exceedances",
     "var_v2_msm_conditional_cdf",
+    "build_loss_panel",
 
     # plotting
     "plot_price_evolution",
@@ -255,4 +258,5 @@ __all__ = [
     "summary_statistics",
     "var_exceedances",
     "violation_rate",
+    "spa_pvalue_for_basis",
 ]
