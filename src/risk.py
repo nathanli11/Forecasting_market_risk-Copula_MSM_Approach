@@ -49,7 +49,7 @@ def summary_statistics(
         row["JB p-value"] = float(jb_result.pvalue)
 
         adf_result = adfuller(series, autolag="AIC")
-        # The paper reports positive ADF values, so we store abs(test statistic)
+        # The paper reports positive ADF values
         row["ADF"] = float(abs(adf_result[0]))
         row["ADF p-value"] = float(adf_result[1])
 
@@ -439,7 +439,7 @@ def christoffersen_lr_test(
     }
 
 
-# 1. GMM duration-based test
+# GMM duration-based test
 def violation_durations(hits):
     idx = np.flatnonzero(np.asarray(hits) == 1)
     if len(idx) < 1:

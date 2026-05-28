@@ -1,4 +1,9 @@
-"""Markov Switching Multifractal volatility model."""
+"""Markov switching multifractal (MSM) marginal model.
+
+This module implements the two-state binomial MSM used as a marginal model in
+Segnon & Trede's copula-MSM VaR replication. Returns are expected to be
+percentage log returns, i.e. 100 * log(P_t/P_{t-1}).
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import norm
+from scipy.optimize import brentq
 
 
 @dataclass(frozen=True)
@@ -323,7 +329,7 @@ def msm_filter(
     }
 
 
-def msm_conditional_cdf(
+def msm_filtered_cdf_series(
     returns: pd.Series | np.ndarray,
     k: int,
     m0: float,
@@ -359,7 +365,7 @@ def msm_probability_integral_transform(
     """
     params = fit_result.params
 
-    pit = msm_conditional_cdf(
+    pit = msm_filtered_cdf_series(
         returns=returns,
         k=fit_result.k,
         m0=params.m0,
@@ -372,6 +378,76 @@ def msm_probability_integral_transform(
 
     pit.name = returns.name
     return pit
+
+
+def msm_state_volatility_factors(k: int, m0: float) -> np.ndarray:
+    """Return h_j = sqrt(prod_i M_i) for all MSM states."""
+    states = make_msm_states(k=k, m0=m0)
+    return np.sqrt(np.prod(states, axis=1))
+
+
+def msm_mixture_cdf(
+    x,
+    state_probs: np.ndarray,
+    sigma: float,
+    h: np.ndarray,
+    mean: float = 0.0,
+    clip_cdf: float = 1e-10,
+):
+    """Conditional MSM CDF for arbitrary x given predictive state probabilities."""
+    probs = np.asarray(state_probs, dtype=float)
+    probs = probs / probs.sum()
+
+    h = np.asarray(h, dtype=float)
+    x_arr = np.asarray(x, dtype=float)
+
+    state_sigmas = sigma * h
+    z = (x_arr[..., None] - mean) / state_sigmas
+
+    cdf = np.sum(probs * norm.cdf(z), axis=-1)
+    cdf = np.clip(cdf, clip_cdf, 1.0 - clip_cdf)
+
+    if np.ndim(x) == 0:
+        return float(cdf)
+
+    return cdf
+
+
+def msm_mixture_quantile(
+    u: float,
+    state_probs: np.ndarray,
+    sigma: float,
+    h: np.ndarray,
+    mean: float = 0.0,
+    lower: float | None = None,
+    upper: float | None = None,
+    root_tol: float = 1e-8,
+) -> float:
+    """Conditional MSM quantile for arbitrary u given predictive state probabilities."""
+    if not 0.0 < u < 1.0:
+        raise ValueError("u must lie in (0, 1).")
+
+    probs = np.asarray(state_probs, dtype=float)
+    probs = probs / probs.sum()
+
+    h = np.asarray(h, dtype=float)
+    max_sd = float(sigma * np.max(h))
+
+    if lower is None:
+        lower = mean - 12.0 * max_sd
+    if upper is None:
+        upper = mean + 12.0 * max_sd
+
+    def objective(x):
+        return msm_mixture_cdf(
+            x=x,
+            state_probs=probs,
+            sigma=sigma,
+            h=h,
+            mean=mean,
+        ) - u
+
+    return float(brentq(objective, lower, upper, xtol=root_tol))
 
 
 def msm_filter_from_result(
