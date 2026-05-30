@@ -32,6 +32,7 @@ This is slower but directly matches the paper's numerical-integration approach.
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -66,6 +67,15 @@ class RollingSpec:
     n_oos: int = 500
     alpha: float = 0.05
     weights: tuple[float, float] = (0.5, 0.5)
+
+
+@dataclass(frozen=True)
+class PortfolioIntegrationCache:
+    """Precomputed objects for repeated portfolio CDF evaluations."""
+
+    nodes: np.ndarray
+    weights: np.ndarray
+    r2_at_nodes: np.ndarray
 
 
 # -----------------------------------------------------------------------------
@@ -396,6 +406,46 @@ def _unit_interval_gauss_legendre(n_nodes: int) -> tuple[np.ndarray, np.ndarray]
     return nodes, weights
 
 
+def _msm_inverse_quantile_exact(
+    u,
+    state_probs: np.ndarray,
+    sigma: float,
+    h: np.ndarray,
+    mean: float,
+    root_tol: float,
+):
+    """Vectorized exact MSM inverse CDF via repeated scalar root solves."""
+    u_arr = np.asarray(u, dtype=float)
+    u_flat = np.clip(u_arr.reshape(-1), EPS, 1.0 - EPS)
+    out = np.array(
+        [
+            msm_mixture_quantile(
+                u=float(ui),
+                state_probs=state_probs,
+                sigma=sigma,
+                h=h,
+                mean=mean,
+                root_tol=root_tol,
+            )
+            for ui in u_flat
+        ],
+        dtype=float,
+    ).reshape(u_arr.shape)
+    if np.ndim(u) == 0:
+        return float(out)
+    return out
+
+
+def build_portfolio_integration_cache(
+    inverse_cdf_2: Callable[[np.ndarray], np.ndarray],
+    integration_nodes: int = 501,
+) -> PortfolioIntegrationCache:
+    """Build and cache integration nodes, weights, and margin-2 quantiles."""
+    nodes, weights = _unit_interval_gauss_legendre(integration_nodes)
+    r2_at_nodes = np.asarray(inverse_cdf_2(nodes), dtype=float)
+    return PortfolioIntegrationCache(nodes=nodes, weights=weights, r2_at_nodes=r2_at_nodes)
+
+
 # -----------------------------------------------------------------------------
 # Copula-based portfolio CDF and VaR solvers
 # -----------------------------------------------------------------------------
@@ -419,6 +469,28 @@ def portfolio_cdf_from_margins_and_copula(
     u1_threshold = cdf_1(r1_threshold)
     cond = copula_conditional_cdf_u1_given_u2(u1_threshold, nodes, copula_params, copula)
     return float(np.sum(weights * cond))
+
+
+def portfolio_cdf_from_margins_and_copula_cached(
+    q: float,
+    cdf_1: Callable[[np.ndarray], np.ndarray],
+    copula_params: dict[str, float],
+    copula: str,
+    cache: PortfolioIntegrationCache,
+    pi: float = 0.5,
+) -> float:
+    """Portfolio CDF using precomputed integration nodes and margin-2 quantiles."""
+    if not 0.0 < pi < 1.0:
+        raise ValueError("pi must be in (0, 1).")
+    r1_threshold = (q - (1.0 - pi) * cache.r2_at_nodes) / pi
+    u1_threshold = cdf_1(r1_threshold)
+    cond = copula_conditional_cdf_u1_given_u2(
+        u1_threshold,
+        cache.nodes,
+        copula_params,
+        copula,
+    )
+    return float(np.sum(cache.weights * cond))
 
 
 def solve_portfolio_var(
@@ -454,6 +526,64 @@ def solve_portfolio_var(
             copula=copula,
             pi=pi,
             integration_nodes=integration_nodes,
+        ) - alpha
+
+    f_low = objective(lower)
+    f_high = objective(upper)
+    expand = 0
+    while not (f_low <= 0.0 <= f_high):
+        width = upper - lower
+        lower -= width
+        upper += width
+        f_low = objective(lower)
+        f_high = objective(upper)
+        expand += 1
+        if expand > 12:
+            raise RuntimeError(f"Unable to bracket VaR root: [{lower}, {upper}], f=[{f_low}, {f_high}]")
+
+    return float(brentq(objective, lower, upper, xtol=root_tol, rtol=1e-6, maxiter=100))
+
+
+def solve_portfolio_var_fast(
+    alpha: float,
+    inverse_cdf_1: Callable[[np.ndarray], np.ndarray],
+    inverse_cdf_2: Callable[[np.ndarray], np.ndarray],
+    cdf_1: Callable[[np.ndarray], np.ndarray],
+    copula_params: dict[str, float],
+    copula: str,
+    pi: float = 0.5,
+    integration_nodes: int = 501,
+    root_tol: float = 1e-4,
+) -> float:
+    """Solve F_p(q)=alpha with cached integration terms.
+
+    Compared with `solve_portfolio_var`, this avoids recomputing Gaussian-Legendre
+    nodes and margin-2 quantiles at every objective call.
+    """
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be in (0, 1).")
+    if pi == 1.0:
+        return float(inverse_cdf_1(np.array([alpha]))[0])
+    if pi == 0.0:
+        return float(inverse_cdf_2(np.array([alpha]))[0])
+
+    cache = build_portfolio_integration_cache(
+        inverse_cdf_2=inverse_cdf_2,
+        integration_nodes=integration_nodes,
+    )
+
+    low_u, high_u = EPS, 1.0 - EPS
+    lower = pi * inverse_cdf_1(np.array([low_u]))[0] + (1.0 - pi) * inverse_cdf_2(np.array([low_u]))[0]
+    upper = pi * inverse_cdf_1(np.array([high_u]))[0] + (1.0 - pi) * inverse_cdf_2(np.array([high_u]))[0]
+
+    def objective(q: float) -> float:
+        return portfolio_cdf_from_margins_and_copula_cached(
+            q=q,
+            cdf_1=cdf_1,
+            copula_params=copula_params,
+            copula=copula,
+            cache=cache,
+            pi=pi,
         ) - alpha
 
     f_low = objective(lower)
@@ -630,21 +760,23 @@ def forecast_msm_copula_var_rolling(
         h2 = np.sqrt(np.prod(states_2, axis=1))
 
         def inv1(u):
-            return msm_mixture_quantile(
+            return _msm_inverse_quantile_exact(
                 u=u,
                 state_probs=p1,
                 sigma=msm_1.params.sigma,
                 h=h1,
                 mean=msm_1.mean_return,
+                root_tol=root_tol,
             )
 
         def inv2(u):
-            return msm_mixture_quantile(
+            return _msm_inverse_quantile_exact(
                 u=u,
                 state_probs=p2,
                 sigma=msm_2.params.sigma,
                 h=h2,
                 mean=msm_2.mean_return,
+                root_tol=root_tol,
             )
 
         def cdf1(x):
@@ -685,6 +817,276 @@ def forecast_msm_copula_var_rolling(
         index=dates,
         name=f"CopulaMSM_{copula}_VaR_{alpha:g}",
     )
+
+
+def forecast_msm_copula_var_rolling_optimized(
+    returns: pd.DataFrame,
+    copula: str = "student",
+    alpha: float = 0.05,
+    weights: Iterable[float] = (0.5, 0.5),
+    k: int = 5,
+    n_insample: int = 1135,
+    n_oos: int = 500,
+    n_starts: int = 10,
+    seed: int = 123,
+    integration_nodes: int = 501,
+    root_tol: float = 1e-4,
+        quantile_mode: str = "exact",
+    quantile_grid_size: int = 4096,
+    verbose: bool = True,
+) -> pd.Series:
+    """Optimized rolling Copula-MSM VaR.
+
+    Optimizations:
+        - Cached integration terms in the portfolio VaR solver.
+        - Optional interpolated MSM quantiles (`quantile_mode="interp"`).
+    - Keeps MSM warm-start logic used by the baseline implementation.
+
+        Methodological equivalence:
+        - `quantile_mode="exact"` keeps the same VaR equation and exact MSM
+            quantile solves as the baseline implementation.
+        - `quantile_mode="interp"` introduces an approximation for speed.
+    """
+    try:
+        from src.msm import (
+            build_msm_quantile_interpolator,
+            fit_msm,
+            make_msm_states,
+            msm_filter_from_result,
+            renewal_probabilities_from_gamma_k,
+            transition_matrix_from_gammas,
+        )
+        from src.copulas import fit_copula
+    except ImportError:
+        from msm import (
+            build_msm_quantile_interpolator,
+            fit_msm,
+            make_msm_states,
+            msm_filter_from_result,
+            renewal_probabilities_from_gamma_k,
+            transition_matrix_from_gammas,
+        )
+        from copulas import fit_copula
+
+    w = validate_alpha_weights(alpha, weights)
+    pi = float(w[0])
+    quantile_mode = str(quantile_mode).lower()
+    if quantile_mode not in {"exact", "interp"}:
+        raise ValueError("quantile_mode must be one of {'exact', 'interp'}.")
+
+    frame = prepare_bivariate_returns(
+        returns,
+        n_insample=n_insample,
+        n_oos=n_oos,
+    )
+
+    assets = list(frame.columns)
+    values: list[float] = []
+    dates: list[pd.Timestamp] = []
+
+    prev_x1 = None
+    prev_x2 = None
+
+    for i, date, window in rolling_windows(frame, n_insample, n_oos):
+        r1 = window[assets[0]]
+        r2 = window[assets[1]]
+
+        initial_extra_1 = [prev_x1] if prev_x1 is not None else None
+        initial_extra_2 = [prev_x2] if prev_x2 is not None else None
+
+        msm_1 = fit_msm(
+            returns=r1,
+            k=k,
+            n_starts=n_starts,
+            seed=seed + 10000 * i + 1,
+            verbose=False,
+            initial_points_extra=initial_extra_1,
+        )
+
+        msm_2 = fit_msm(
+            returns=r2,
+            k=k,
+            n_starts=n_starts,
+            seed=seed + 10000 * i + 2,
+            verbose=False,
+            initial_points_extra=initial_extra_2,
+        )
+
+        prev_x1 = np.array(
+            [
+                msm_1.params.m0,
+                msm_1.params.sigma,
+                msm_1.params.b,
+                msm_1.params.gamma_k,
+            ],
+            dtype=float,
+        )
+
+        prev_x2 = np.array(
+            [
+                msm_2.params.m0,
+                msm_2.params.sigma,
+                msm_2.params.b,
+                msm_2.params.gamma_k,
+            ],
+            dtype=float,
+        )
+
+        filt_1 = msm_filter_from_result(r1, msm_1)
+        filt_2 = msm_filter_from_result(r2, msm_2)
+
+        pit = pd.concat(
+            [
+                filt_1["pit"].rename(assets[0]),
+                filt_2["pit"].rename(assets[1]),
+            ],
+            axis=1,
+        ).dropna()
+
+        cop_fit = fit_copula(
+            pit,
+            copula=copula,
+            margin_model="MSM",
+        )
+
+        gammas_1 = renewal_probabilities_from_gamma_k(
+            k=k,
+            b=msm_1.params.b,
+            gamma_k=msm_1.params.gamma_k,
+        )
+        gammas_2 = renewal_probabilities_from_gamma_k(
+            k=k,
+            b=msm_2.params.b,
+            gamma_k=msm_2.params.gamma_k,
+        )
+
+        A_1 = transition_matrix_from_gammas(gammas_1)
+        A_2 = transition_matrix_from_gammas(gammas_2)
+
+        p1 = filt_1["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_1
+        p2 = filt_2["filtered_probs"].iloc[-1].to_numpy(dtype=float) @ A_2
+
+        states_1 = make_msm_states(k=k, m0=msm_1.params.m0)
+        states_2 = make_msm_states(k=k, m0=msm_2.params.m0)
+
+        h1 = np.sqrt(np.prod(states_1, axis=1))
+        h2 = np.sqrt(np.prod(states_2, axis=1))
+
+        if quantile_mode == "interp":
+            inv1 = build_msm_quantile_interpolator(
+                state_probs=p1,
+                sigma=msm_1.params.sigma,
+                h=h1,
+                mean=msm_1.mean_return,
+                grid_size=quantile_grid_size,
+            )
+            inv2 = build_msm_quantile_interpolator(
+                state_probs=p2,
+                sigma=msm_2.params.sigma,
+                h=h2,
+                mean=msm_2.mean_return,
+                grid_size=quantile_grid_size,
+            )
+        else:
+            def inv1(u):
+                return _msm_inverse_quantile_exact(
+                    u=u,
+                    state_probs=p1,
+                    sigma=msm_1.params.sigma,
+                    h=h1,
+                    mean=msm_1.mean_return,
+                    root_tol=root_tol,
+                )
+
+            def inv2(u):
+                return _msm_inverse_quantile_exact(
+                    u=u,
+                    state_probs=p2,
+                    sigma=msm_2.params.sigma,
+                    h=h2,
+                    mean=msm_2.mean_return,
+                    root_tol=root_tol,
+                )
+
+        def cdf1(x):
+            return msm_mixture_cdf(
+                x=x,
+                state_probs=p1,
+                sigma=msm_1.params.sigma,
+                h=h1,
+                mean=msm_1.mean_return,
+            )
+
+        var_t = solve_portfolio_var_fast(
+            alpha=alpha,
+            inverse_cdf_1=inv1,
+            inverse_cdf_2=inv2,
+            cdf_1=cdf1,
+            copula_params=cop_fit.params,
+            copula=copula,
+            pi=pi,
+            integration_nodes=integration_nodes,
+            root_tol=root_tol,
+        )
+
+        values.append(var_t)
+        dates.append(date)
+
+        if verbose and (i + 1) % 10 == 0:
+            print(
+                f"MSM-{copula} optimized[{quantile_mode}] alpha={alpha:g}: "
+                f"{i + 1}/{n_oos}, "
+                f"VaR={var_t:.4f}, "
+                f"x1={prev_x1.round(4)}, "
+                f"x2={prev_x2.round(4)}"
+            )
+
+    return pd.Series(
+        values,
+        index=dates,
+        name=f"CopulaMSMOptimized_{copula}_VaR_{alpha:g}",
+    )
+
+
+def _run_single_msm_copula_forecast(args):
+    returns, copula, kwargs = args
+    series = forecast_msm_copula_var_rolling_optimized(
+        returns=returns,
+        copula=copula,
+        **kwargs,
+    )
+    return copula, series
+
+
+def forecast_msm_copula_var_models_parallel(
+    returns: pd.DataFrame,
+    copulas: Iterable[str] = SUPPORTED_COPULAS,
+    n_jobs: int | None = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """Run optimized Copula-MSM VaR per copula in parallel processes.
+
+    This parallelizes across copula families, which are independent tasks.
+    """
+    copula_list = [str(c).lower() for c in copulas]
+
+    if n_jobs is None or n_jobs <= 1:
+        out: dict[str, pd.Series] = {}
+        for c in copula_list:
+            out[f"Copula-MSM {c}"] = forecast_msm_copula_var_rolling_optimized(
+                returns=returns,
+                copula=c,
+                **kwargs,
+            )
+        return pd.concat(out, axis=1)
+
+    payload = [(returns, c, kwargs) for c in copula_list]
+    out: dict[str, pd.Series] = {}
+    with ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        for c, series in executor.map(_run_single_msm_copula_forecast, payload):
+            out[f"Copula-MSM {c}"] = series
+
+    return pd.concat(out, axis=1)
 
 # -----------------------------------------------------------------------------
 # Rolling GARCH, Copula-GARCH, CCC-GARCH

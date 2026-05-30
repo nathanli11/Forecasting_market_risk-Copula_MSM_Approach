@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import product
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -448,6 +449,92 @@ def msm_mixture_quantile(
         ) - u
 
     return float(brentq(objective, lower, upper, xtol=root_tol))
+
+
+def build_msm_quantile_interpolator(
+    state_probs: np.ndarray,
+    sigma: float,
+    h: np.ndarray,
+    mean: float = 0.0,
+    lower: float | None = None,
+    upper: float | None = None,
+    grid_size: int = 4096,
+    clip_cdf: float = 1e-10,
+) -> Callable[[np.ndarray | float], np.ndarray | float]:
+    """Build a fast interpolating inverse CDF for the MSM mixture.
+
+    The returned callable supports scalar or vector inputs in (0, 1).
+    """
+    if grid_size < 512:
+        raise ValueError("grid_size should be at least 512 for stable interpolation.")
+
+    probs = np.asarray(state_probs, dtype=float).reshape(-1)
+    probs = probs / probs.sum()
+
+    h = np.asarray(h, dtype=float).reshape(-1)
+    max_sd = float(sigma * np.max(h))
+
+    if lower is None:
+        lower = mean - 12.0 * max_sd
+    if upper is None:
+        upper = mean + 12.0 * max_sd
+
+    x_grid = np.linspace(lower, upper, int(grid_size), dtype=float)
+    cdf_grid = msm_mixture_cdf(
+        x=x_grid,
+        state_probs=probs,
+        sigma=sigma,
+        h=h,
+        mean=mean,
+        clip_cdf=clip_cdf,
+    )
+
+    cdf_unique, unique_idx = np.unique(cdf_grid, return_index=True)
+    x_unique = x_grid[unique_idx]
+
+    if cdf_unique.size < 2:
+        raise RuntimeError("Degenerate MSM CDF grid; cannot build quantile interpolator.")
+
+    lo = float(cdf_unique[0])
+    hi = float(cdf_unique[-1])
+
+    def inv(u: np.ndarray | float) -> np.ndarray | float:
+        u_arr = np.asarray(u, dtype=float)
+        u_arr = np.clip(u_arr, lo, hi)
+        q = np.interp(u_arr, cdf_unique, x_unique)
+        if np.ndim(u) == 0:
+            return float(q)
+        return q
+
+    return inv
+
+
+def msm_mixture_quantile_vectorized(
+    u: np.ndarray | float,
+    state_probs: np.ndarray,
+    sigma: float,
+    h: np.ndarray,
+    mean: float = 0.0,
+    lower: float | None = None,
+    upper: float | None = None,
+    grid_size: int = 4096,
+    clip_cdf: float = 1e-10,
+) -> np.ndarray | float:
+    """Approximate MSM quantiles with one CDF grid and interpolation.
+
+    This is much faster than repeatedly calling `msm_mixture_quantile` in loops.
+    """
+    inv = build_msm_quantile_interpolator(
+        state_probs=state_probs,
+        sigma=sigma,
+        h=h,
+        mean=mean,
+        lower=lower,
+        upper=upper,
+        grid_size=grid_size,
+        clip_cdf=clip_cdf,
+    )
+    return inv(u)
 
 
 def msm_filter_from_result(

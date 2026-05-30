@@ -342,6 +342,34 @@ def _negative_loglikelihood(
     return -float(np.sum(logpdf))
 
 
+def copula_loglikelihood(
+    uniforms: pd.DataFrame,
+    copula: str,
+    params: dict[str, float],
+) -> float:
+    """Evaluate the copula log-likelihood at fixed parameters."""
+    frame = _validate_uniforms(uniforms)
+    copula = copula.lower()
+
+    if copula == "gaussian":
+        x = np.array([params["rho"]], dtype=float)
+    elif copula == "student":
+        x = np.array([params["rho"], params["nu"]], dtype=float)
+    elif copula == "plackett":
+        x = np.array([params["theta"]], dtype=float)
+    elif copula in {"clayton", "rotated_clayton", "frank", "gumbel", "rotated_gumbel"}:
+        x = np.array([params["theta"]], dtype=float)
+    elif copula == "sjc":
+        x = np.array([params["tau_u"], params["tau_l"]], dtype=float)
+    else:
+        raise ValueError(f"Unknown copula: {copula}")
+
+    logpdf = _copula_logpdf_from_vector(copula, frame, x)
+    if np.any(~np.isfinite(logpdf)):
+        return -np.inf
+    return float(np.sum(logpdf))
+
+
 def _initial_points_and_bounds(
     copula: str,
     uniforms: pd.DataFrame,
